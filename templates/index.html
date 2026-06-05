@@ -7,17 +7,32 @@
 <body>
 
     <div class="container">
-        <h2>Upload Excel Form</h2>
-        <form action="/extract" method="post" enctype="multipart/form-data">
-            <input type="file" name="excelFile" accept=".xls,.xlsx" />
+
+        
+        <form id="payslipForm" action="/extract" method="post" enctype="multipart/form-data">
+
+            <h2>Email Login</h2>
+            <label for="smtpEmail">Enter email address</label>
+            <input type="email" id="smtpEmail" name="smtpEmail" class="textfield" autocomplete="username" required />
             <br/><br/>
+
+            <label for="smtpPassword">Enter password</label>
+            <input type="password" id="smtpPassword" name="smtpPassword" class="textfield" autocomplete="current-password" required />
+            <br/><br/>
+
+            <h2>Upload Excel Form (Only for options that require one)</h2>
+            <input type="file" name="excelFile" accept=".xls,.xlsx, .csv" />
+            <br/><br/>
+            
             <h2>Choose function type</h2>
             <label for="options"></label>
             <select id="options" name="options">
                 <option value="default">Select...</option>
                 <option value="custom">Custom</option>
                 <option value="salarySlip">Salary Slip</option>
+                <option value="emailOnly">Email with optional image</option>
             </select><br><br>
+
 
             <div id="customFields" style="display:none;">
                 <label for="field1">Enter first line for file</label>
@@ -38,6 +53,36 @@
             </div>
 
 
+            <div id="emailOnly" style="display:none;">
+                <label for="image">Upload body image (Optional)</label>
+                <input type="file" id="image" name="image" accept="image/*" /> 
+                <br/><br/>
+
+                <label for="field11">Enter sender name</label>
+                <input type="text" id="field11" name="field11" class="textfield" />
+                <br/><br/>
+
+                <label for="field12">Enter sender title</label>
+                <input type="text" id="field12" name="field12" class="textfield" />
+                <br/><br/>
+
+                <label for="field13">Enter company</label>
+                <input type="text" id="field13" name="field13" placeholder="Conacent Consulting Pvt Ltd" class="textfield" />
+                <br/><br/>
+
+                <label for="field14">Enter address</label>
+                <input type="text" id="field14" name="field14" class="textfield" />
+                <br/><br/>
+
+                <label for="field15">Enter phone number</label>
+                <input type="text" id="field15" name="field15" class="textfield" />
+                <br/><br/>
+
+                <label for="field16">Enter website url</label><br>
+                <input type="url" id="field16" name="field16" placeholder="https://www.conacent.com/" disabled><br><br>
+
+            </div>
+
             <h2>Password Encryption</h2>
             <div class="checkbox-input">
                 <label for="encrypt"></label>
@@ -45,19 +90,94 @@
                 <br/><br/>
             </div>
 
-            <input type="submit" value="Submit" />
+            <button type="submit" id="submitBtn" class="submit-btn">
+                <span class="submit-label">Submit</span>
+                <span class="submit-spinner" aria-hidden="true"></span>
+            </button>
+            <div id="submitStatus" class="submit-status" aria-live="polite"></div>
 
             <script>
-                document.getElementById("options").addEventListener("change", function() {
-                    var selectedOption = this.value;
-                    var customFields = document.getElementById("customFields");
-        
-                    if (selectedOption === "custom") {
-                        customFields.style.display = "block";
-                    } else {
+                var form = document.getElementById("payslipForm");
+                var options = document.getElementById("options");
+                var customFields = document.getElementById("customFields");
+                var emailOnlyField = document.getElementById("emailOnly");
+                var field16 = document.getElementById("field16");
+                var submitBtn = document.getElementById("submitBtn");
+                var submitLabel = document.querySelector("#submitBtn .submit-label");
+                var submitStatus = document.getElementById("submitStatus");
+
+                function setFieldsDisabled(container, disabled) {
+                    container.querySelectorAll("input, select, textarea").forEach(function(input) {
+                        input.disabled = disabled;
+                    });
+                }
+
+                function updateVisibleFields() {
+                    var selectedOption = options.value;
+
+                    if (selectedOption === "default" || selectedOption === "salarySlip") {
                         customFields.style.display = "none";
+                        emailOnlyField.style.display = "none";
+                        setFieldsDisabled(customFields, true);
+                        setFieldsDisabled(emailOnlyField, true);
+                        field16.required = false;
+                    } else if (selectedOption === "custom") {
+                        customFields.style.display = "block";
+                        emailOnlyField.style.display = "none";
+                        setFieldsDisabled(customFields, false);
+                        setFieldsDisabled(emailOnlyField, true);
+                        field16.required = false;
+                    } else if (selectedOption === "emailOnly") {
+                        emailOnlyField.style.display = "block";
+                        customFields.style.display = "none";
+                        setFieldsDisabled(emailOnlyField, false);
+                        setFieldsDisabled(customFields, true);
+                        field16.required = true;
                     }
+
+                    console.log("[payslip-form] option changed", {
+                        selectedOption: selectedOption,
+                        customFieldsVisible: customFields.style.display,
+                        emailOnlyVisible: emailOnlyField.style.display,
+                        websiteRequired: field16.required,
+                        websiteDisabled: field16.disabled
+                    });
+                }
+
+                options.addEventListener("change", updateVisibleFields);
+
+                form.addEventListener("submit", function() {
+                        console.log("[payslip-form] submit clicked", {
+                            option: options.value,
+                            encryptChecked: document.getElementById("encrypt").checked,
+                            excelFileCount: form.elements["excelFile"].files.length,
+                            imageFileCount: form.elements["image"] ? form.elements["image"].files.length : 0,
+                            formValid: form.checkValidity()
+                        });
+
+                    if (!form.checkValidity()) {
+                        console.warn("[payslip-form] submit blocked by browser validation");
+                        return;
+                    }
+
+                    submitBtn.disabled = true;
+                    submitBtn.classList.add("is-loading");
+                    submitLabel.textContent = "Processing...";
+                    submitStatus.textContent = "Generating and sending PDFs. Keep this tab open.";
                 });
+
+                form.querySelectorAll("input, select, textarea").forEach(function(input) {
+                    input.addEventListener("invalid", function() {
+                        console.warn("[payslip-form] invalid field", {
+                            name: input.name,
+                            id: input.id,
+                            value: input.type === "password" ? "[redacted]" : input.type === "file" ? input.files.length + " file(s)" : input.value,
+                            validationMessage: input.validationMessage
+                        });
+                    });
+                });
+
+                updateVisibleFields();
             </script>
 
             </div>

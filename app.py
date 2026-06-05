@@ -2,7 +2,7 @@
 import openpyxl
 import shutil
 
-from sendEmail import sendEmail
+import sendEmail
 
 
 
@@ -31,10 +31,22 @@ from reportlab.lib import colors
 
 from flask import Flask, render_template, request, jsonify, send_file
 from zipfile import ZipFile
+from io import BytesIO
 import os
 import requests
+import logging
 
 app = Flask(__name__)
+logging.basicConfig(level=logging.INFO)
+
+
+def count_rows_to_send(sheet, start_row=3):
+    count = 0
+    for row_number in range(start_row, sheet.max_row + 1):
+        if sheet.cell(row=row_number, column=1).value is None:
+            break
+        count += 1
+    return count
 
 @app.route('/')
 def index():
@@ -44,6 +56,12 @@ def index():
 
 def create_payslip():
 
+    app.logger.info(
+        "POST /extract received: form_keys=%s file_keys=%s content_length=%s",
+        list(request.form.keys()),
+        list(request.files.keys()),
+        request.content_length,
+    )
 
     #this was changed
     #convert the font so it is compatible
@@ -54,10 +72,21 @@ def create_payslip():
     is_encrypted = request.form.get('encrypt')
 
     option = request.form.get('options')
+    smtp_email = request.form.get('smtpEmail', "")
+    smtp_password = request.form.get('smtpPassword', "")
+    app.logger.info("Selected option=%s encrypt=%s", option, is_encrypted)
+    app.logger.info("SMTP login supplied=%s sender_email=%s", bool(smtp_email), smtp_email)
     
     # Handle the uploaded file and form inputs here
     # Example: Save the file, process it, etc.
-    print(option)
+
+
+    r = request.files.get('excelFile')
+    if r is None or r.filename == "":
+        app.logger.error("No excelFile uploaded. file_keys=%s", list(request.files.keys()))
+        return "No Excel file was uploaded.", 400
+    app.logger.info("Uploaded excelFile filename=%s content_type=%s", r.filename, r.content_type)
+    
 
     if option == 'custom':
         file_header = request.form['field1']
@@ -65,6 +94,24 @@ def create_payslip():
         email_file_body = request.form['field3']
         # Handle custom fields data
     
+    if option == "emailOnly":
+
+        image_file = request.files.get('image')
+        img = image_file.filename if image_file and image_file.filename else ""
+        sender = request.form.get('field11', "")
+        sender_title = request.form.get('field12', "")
+        company = request.form.get('field13', "")
+        com_address = request.form.get('field14', "")
+        ph_number = request.form.get('field15', "")
+        com_email = request.form.get('field16', "")
+        app.logger.info(
+            "emailOnly fields: image_filename=%s sender=%s sender_title=%s company=%s website=%s",
+            img,
+            sender,
+            sender_title,
+            company,
+            com_email,
+        )
     
     if option == 'salarySlip':
         file_header = "Salary slip for the month of"
@@ -72,13 +119,75 @@ def create_payslip():
         bottom_label = "The figures in the salary slip are confidential and not to be disclosed.\
               Signature is not required for this payslip"
 
+    
+    app.logger.info("Starting workbook load for option=%s", option)
 
 
-    r = request.files['excelFile']
+    
 
     #import the sheet from the excel file
-    wb = openpyxl.load_workbook(r, data_only=True)
-    sheet = wb[wb.sheetnames[0]]
+    try:
+        wb = openpyxl.load_workbook(r, data_only=True)
+        sheet = wb[wb.sheetnames[0]]
+        # Print or log information to inspect the workbook and sheet
+        app.logger.info(
+            "Workbook loaded: sheets=%s active_sheet=%s dimensions=%s",
+            wb.sheetnames,
+            sheet.title,
+            sheet.dimensions,
+        )
+        # Add more print statements to inspect the data
+    except Exception as e:
+        app.logger.exception("Error loading workbook")
+        return f"Error loading workbook: {e}", 400
+
+    app.logger.info("Workbook processing started for option=%s", option)
+    if option == "emailOnly":
+        email_send_total = count_rows_to_send(sheet, start_row=1)
+        email_send_index = 0
+        for row_number, row in enumerate(sheet, start=1):
+            name = row[0]
+            email = row[1]
+            app.logger.info("emailOnly row=%s name=%s email=%s", row_number, name.value, email.value)
+            try:
+                email_send_index += 1
+                app.logger.info(
+                    "About to send emailOnly message row=%s recipient=%s sender=%s",
+                    row_number,
+                    email.value,
+                    smtp_email,
+                )
+                app.logger.info(
+                    "EmailOnly progress %s/%s row=%s smtp_host=%s smtp_port=%s",
+                    email_send_index,
+                    email_send_total,
+                    row_number,
+                    sendEmail.SMTP_HOST,
+                    sendEmail.SMTP_PORT,
+                )
+                sendEmail.sendEmailWithImage(
+                    str(name.value),
+                    img,
+                    sender,
+                    sender_title,
+                    company,
+                    com_address,
+                    ph_number,
+                    com_email,
+                    str(email.value),
+                    smtp_user=smtp_email,
+                    smtp_password=smtp_password,
+                )
+
+            except Exception as e:
+                app.logger.exception("emailOnly send failed at row=%s", row_number)
+                return f"Email send failed at row {row_number}: {e}", 400
+        return "done", 200
+
+
+
+
+
 
     #print(sheet.cell(4,1).value)
     #Page information
@@ -110,6 +219,8 @@ def create_payslip():
     styles = getSampleStyleSheet()
     i = 3
     emails = []
+    pdf_send_total = count_rows_to_send(sheet, start_row=3)
+    pdf_send_index = 0
     while (i):
         vals = []
         password = ""
@@ -143,8 +254,9 @@ def create_payslip():
                 vals.append("N/A")
         name =  str(vals[1])+ ' ' + str(vals[0])  + '.pdf' 
         email = emails[i - 3]
+        pdf_buffer = BytesIO()
         pdf = SimpleDocTemplate(
-                    name,
+                    pdf_buffer,
                     pagesize= A4,
                     )
 
@@ -263,51 +375,65 @@ def create_payslip():
             elements.append(Paragraph(f"<i>{bottom_label}</i>",  yourStyle))
             elements.append(Paragraph("<i> Registered Office:  P-94/95, Bangur Avenue, BL-C, Kolkata - 700055 </i>",  yourStyle))
             pdf.build(elements)
+            pdf_buffer.seek(0)
 
             # create a PdfFileWriter object
             out = PdfFileWriter()
-            
 
-            
-            # Open our PDF file with the PdfFileReader
-            filename = PdfFileReader(name)
+            # Read the generated PDF from memory
+            filename = PdfFileReader(pdf_buffer)
             out.appendPagesFromReader(filename)
             is_pan = ""
-            print(is_encrypted)
+            # print(is_encrypted)
             if is_encrypted == "on":
-                print(is_encrypted)
-                print("trigger")
+                
+                # print("trigger")
                 password = vals[5]
                 out.encrypt(user_pwd = password)
                 is_pan = "Please use your PAN number as the password for opening the pdf document."
 
-
-            with open(name, "wb") as f:
-                # Write our encrypted PDF to this file
-                out.write(f)
-            #return send_file(name)
-
-            #zipObj.write(name)
+            out_buffer = BytesIO()
+            out.write(out_buffer)
+            out_buffer.seek(0)
+            pdf_bytes = out_buffer.getvalue()
+            pdf_buffer.close()
+            out_buffer.close()
 
 
             i += 1
             year = vals[0]
             if (year != "N/A"):
-                import os 
-                if os.path.exists(name):
-                    limit = name + " second to last being sent/ last before breaking"
-                    print(name + " second to last being sent/ last before breaking")
-                    try :
-                        sendEmail(name = name, email = email, month=str(vals[0]), person_name= str (vals[1]), \
-                        email_file_body = email_file_body, is_pan= is_pan)
-                        os.remove(name)
-                    except:
-                        return f"The limit has been reached. This is the {limit}. Please try again in 5 minutes", 400
-
-
-
-                else:
-                    print("The file does not exist")
+                pdf_send_index += 1
+                app.logger.info(
+                    "About to send PDF email row=%s pdf=%s recipient=%s sender=%s",
+                    i,
+                    name,
+                    email,
+                    smtp_email,
+                )
+                app.logger.info(
+                    "PDF progress %s/%s row=%s smtp_host=%s smtp_port=%s",
+                    pdf_send_index,
+                    pdf_send_total,
+                    i,
+                    sendEmail.SMTP_HOST,
+                    sendEmail.SMTP_PORT,
+                )
+                try:
+                    sendEmail.sendEmailWithPDF(
+                        pdf_bytes=pdf_bytes,
+                        pdf_name=name,
+                        email=email,
+                        month=str(vals[0]),
+                        person_name=str(vals[1]),
+                        email_file_body=email_file_body,
+                        is_pan=is_pan,
+                        smtp_user=smtp_email,
+                        smtp_password=smtp_password,
+                    )
+                except Exception as e:
+                    app.logger.exception("Failed sending PDF email for %s", name)
+                    return f"Email send failed for {name}: {e}", 400
 
           
     # if (year != "N/A"):

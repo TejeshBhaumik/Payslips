@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: payslips
+    runtime: python
+    region: oregon
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT
+    envVars:
+      - key: SMTP_HOST
+        value: mail.conacent.com
+      - key: SMTP_PORT
+        value: "587"
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_PASSWORD
+        sync: false
+      - key: SMTP_DEBUG
+        value: "0"
+      - key: MAX_EMAILS_PER_BATCH
+        value: "30"
+      - key: RATE_LIMIT_COOLDOWN_SECONDS
+        value: "300"
