@@ -18,3 +18,5 @@ services:
         sync: false
       - key: SMTP_DEBUG
         value: "0"
+      - key: SMTP_RETRY_DELAY_SECONDS
+        value: "600"

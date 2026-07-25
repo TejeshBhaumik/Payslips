@@ -37,11 +37,13 @@ import requests
 import logging
 import threading
 import uuid
+from datetime import datetime, timedelta, timezone
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 logging.getLogger("werkzeug").setLevel(logging.WARNING)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+SMTP_RETRY_DELAY_SECONDS = int(os.environ.get("SMTP_RETRY_DELAY_SECONDS", "600"))
 JOBS = {}
 JOBS_LOCK = threading.Lock()
 
@@ -57,6 +59,9 @@ def create_job():
             "current": "",
             "message": "Preparing batch.",
             "error": "",
+            "resume_row": None,
+            "retry_at": "",
+            "retry_count": 0,
         }
     return job_id
 
@@ -81,6 +86,45 @@ def count_rows_to_send(sheet, start_row=3):
             break
         count += 1
     return count
+
+
+def schedule_retry(
+    job_id,
+    form_data,
+    excel_bytes,
+    excel_filename,
+    excel_content_type,
+    image_filename,
+    resume_row,
+    sent,
+):
+    retry_at = datetime.now(timezone.utc) + timedelta(seconds=SMTP_RETRY_DELAY_SECONDS)
+    job = get_job(job_id) or {}
+    retry_count = int(job.get("retry_count") or 0) + 1
+    message = (
+        f"Email provider stopped sending. Retrying from Excel row {resume_row} "
+        f"in {SMTP_RETRY_DELAY_SECONDS // 60} minutes."
+    )
+    update_job(
+        job_id,
+        status="waiting",
+        sent=sent,
+        resume_row=resume_row,
+        retry_at=retry_at.isoformat(),
+        retry_count=retry_count,
+        message=message,
+        error="",
+        current=f"Excel row {resume_row}",
+    )
+    app.logger.warning("Batch %s paused at Excel row %s; retrying at %s", job_id, resume_row, retry_at.isoformat())
+
+    timer = threading.Timer(
+        SMTP_RETRY_DELAY_SECONDS,
+        run_extract_job,
+        args=(job_id, form_data, excel_bytes, excel_filename, excel_content_type, image_filename, resume_row, sent),
+    )
+    timer.daemon = True
+    timer.start()
 
 @app.route('/')
 def index():
@@ -128,7 +172,16 @@ def extract_status(job_id):
     return jsonify(job)
 
 
-def run_extract_job(job_id, form_data, excel_bytes, excel_filename, excel_content_type, image_filename):
+def run_extract_job(
+    job_id,
+    form_data,
+    excel_bytes,
+    excel_filename,
+    excel_content_type,
+    image_filename,
+    start_row=None,
+    sent_so_far=0,
+):
     try:
         message, status_code = run_extract_sync(
             form_data,
@@ -137,6 +190,8 @@ def run_extract_job(job_id, form_data, excel_bytes, excel_filename, excel_conten
             excel_content_type,
             image_filename,
             job_id,
+            start_row=start_row,
+            sent_so_far=sent_so_far,
         )
         if status_code >= 400:
             update_job(job_id, status="failed", error=message, message=message)
@@ -149,21 +204,37 @@ def run_extract_job(job_id, form_data, excel_bytes, excel_filename, excel_conten
         )
         app.logger.info("Batch %s completed.", job_id)
     except sendEmail.RateLimitExceeded as e:
-        message = str(e) or "Email provider stopped sending. Please retry later."
-        app.logger.warning("Batch %s stopped by the SMTP provider: %s", job_id, message)
-        update_job(
+        resume_row = getattr(e, "excel_row", start_row)
+        sent = getattr(e, "sent", sent_so_far)
+        if resume_row is None:
+            message = str(e) or "Email provider stopped sending. Please retry later."
+            update_job(job_id, status="limited", error=message, message=message, current="")
+            return
+        schedule_retry(
             job_id,
-            status="limited",
-            error=message,
-            message=message,
-            current="",
+            form_data,
+            excel_bytes,
+            excel_filename,
+            excel_content_type,
+            image_filename,
+            resume_row,
+            sent,
         )
     except Exception as e:
         app.logger.exception("Batch %s failed", job_id)
         update_job(job_id, status="failed", error=str(e), message=str(e), current="")
 
 
-def run_extract_sync(form_data, excel_bytes, excel_filename, excel_content_type, image_filename, job_id):
+def run_extract_sync(
+    form_data,
+    excel_bytes,
+    excel_filename,
+    excel_content_type,
+    image_filename,
+    job_id,
+    start_row=None,
+    sent_so_far=0,
+):
 
     #this was changed
     #convert the font so it is compatible
@@ -186,7 +257,15 @@ def run_extract_sync(form_data, excel_bytes, excel_filename, excel_content_type,
     if not excel_bytes:
         app.logger.warning("No employee data file uploaded.")
         return "please enter employee data excel", 400
-    app.logger.info("Batch %s started. option=%s file=%s bytes=%d", job_id, option, excel_filename, len(excel_bytes))
+    app.logger.info(
+        "Batch %s started. option=%s file=%s bytes=%d start_row=%s sent_so_far=%s",
+        job_id,
+        option,
+        excel_filename,
+        len(excel_bytes),
+        start_row,
+        sent_so_far,
+    )
     
 
     if option == 'custom':
@@ -220,19 +299,24 @@ def run_extract_sync(form_data, excel_bytes, excel_filename, excel_content_type,
         return f"Error loading workbook: {e}", 400
 
     if option == "emailOnly":
+        first_row = start_row or 1
         email_send_total = count_rows_to_send(sheet, start_row=1)
         app.logger.info("Batch %s loaded workbook. rows=%d workflow=emailOnly", job_id, email_send_total)
-        email_send_index = 0
+        email_send_index = sent_so_far
         update_job(
             job_id,
             status="running",
             total=email_send_total,
-            sent=0,
+            sent=email_send_index,
             message="Sending email batch.",
+            retry_at="",
+            resume_row=None,
         )
-        for row_number, row in enumerate(sheet, start=1):
-            name = row[0]
-            email = row[1]
+        for row_number in range(first_row, sheet.max_row + 1):
+            name = sheet.cell(row=row_number, column=1)
+            if name.value is None:
+                break
+            email = sheet.cell(row=row_number, column=2)
             try:
                 email_send_index += 1
                 update_job(
@@ -260,7 +344,10 @@ def run_extract_sync(form_data, excel_bytes, excel_filename, excel_content_type,
                     message=f"Sent {email_send_index} of {email_send_total}",
                 )
 
-            except sendEmail.RateLimitExceeded:
+            except sendEmail.RateLimitExceeded as e:
+                email_send_index -= 1
+                e.excel_row = row_number
+                e.sent = email_send_index
                 raise
             except Exception as e:
                 app.logger.exception("emailOnly send failed at row=%s", row_number)
@@ -299,23 +386,26 @@ def run_extract_sync(form_data, excel_bytes, excel_filename, excel_content_type,
     year = ""
 
     styles = getSampleStyleSheet()
-    i = 3
-    emails = []
+    i = start_row or 3
     pdf_send_total = count_rows_to_send(sheet, start_row=3)
     app.logger.info("Batch %s loaded workbook. rows=%d workflow=%s", job_id, pdf_send_total, option)
-    pdf_send_index = 0
+    pdf_send_index = sent_so_far
     update_job(
         job_id,
         status="running",
         total=pdf_send_total,
-        sent=0,
+        sent=pdf_send_index,
         message="Generating and sending payslips.",
+        retry_at="",
+        resume_row=None,
     )
     while (i):
         vals = []
+        email = ""
         password = ""
         if sheet.cell(row = i, column = 1).value is None:
             break
+        row_number = i
         for j in range(1,sheet.max_column+1):
            
             if sheet.cell(row = i, column = j).value is not None:
@@ -335,13 +425,12 @@ def run_extract_sync(form_data, excel_bytes, excel_filename, excel_content_type,
                     inp = date + "/" + month + "/" + y
                     inp = inp.replace(" ","")             
                 if "@" in inp:
-                    emails.append(inp)
+                    email = inp
                 else :
                     vals.append(inp)
             else:
                 vals.append("N/A")
         name =  str(vals[1])+ ' ' + str(vals[0])  + '.pdf' 
-        email = emails[i - 3]
         pdf_buffer = BytesIO()
         pdf = SimpleDocTemplate(
                     pdf_buffer,
@@ -511,7 +600,10 @@ def run_extract_sync(form_data, excel_bytes, excel_filename, excel_content_type,
                         current=name,
                         message=f"Sent payslip {pdf_send_index} of {pdf_send_total}",
                     )
-                except sendEmail.RateLimitExceeded:
+                except sendEmail.RateLimitExceeded as e:
+                    pdf_send_index -= 1
+                    e.excel_row = row_number
+                    e.sent = pdf_send_index
                     raise
                 except Exception as e:
                     app.logger.exception("Failed sending PDF email for %s", name)

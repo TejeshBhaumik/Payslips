@@ -22,6 +22,7 @@ const successModal = document.querySelector("#successModal");
 const successModalClose = document.querySelector("#successModalClose");
 
 let pollTimer = null;
+const alertedWaitStates = new Set();
 
 const workflowCopy = {
     default: "Choose a workflow before starting the batch.",
@@ -93,6 +94,11 @@ function setProgress(job) {
     progressBar.style.width = `${percent}%`;
 }
 
+function clearPollTimer() {
+    clearTimeout(pollTimer);
+    pollTimer = null;
+}
+
 function resetSubmitButton(label = "Start batch") {
     submitBtn.disabled = false;
     submitBtn.classList.remove("is-loading");
@@ -143,19 +149,17 @@ async function pollJob(jobId) {
     setProgress(job);
 
     if (job.status === "complete") {
-        clearInterval(pollTimer);
-        pollTimer = null;
+        clearPollTimer();
         resetSubmitButton("Start another batch");
         submitStatus.textContent = "all payslips generated and sent";
         progressMessage.textContent = "all payslips generated and sent";
         setRunState("Complete", "success");
         showSuccessModal();
-        return true;
+        return { done: true };
     }
 
     if (job.status === "limited") {
-        clearInterval(pollTimer);
-        pollTimer = null;
+        clearPollTimer();
         const sent = Number(job.sent || 0);
         const total = Number(job.total || 0);
         const retryText = job.message || "Email provider stopped sending. Please retry later.";
@@ -167,103 +171,41 @@ async function pollJob(jobId) {
         progressMessage.textContent = limitMessage;
         setRunState("Limit hit", "warning");
         showLimitModal(limitMessage);
-        return true;
+        return { done: true };
+    }
+
+    if (job.status === "waiting") {
+        const sent = Number(job.sent || 0);
+        const total = Number(job.total || 0);
+        const retryAt = job.retry_at ? new Date(job.retry_at) : null;
+        const retryDelay = retryAt ? Math.max(1000, retryAt.getTime() - Date.now() + 5000) : 600000;
+        const retryTime = retryAt ? retryAt.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "soon";
+        const waitMessage = total > 0
+            ? `Stopped after sending ${sent} of ${total}. Retrying automatically at ${retryTime} from Excel row ${job.resume_row}.`
+            : `Retrying automatically at ${retryTime}.`;
+
+        submitStatus.textContent = waitMessage;
+        progressMessage.textContent = waitMessage;
+        setRunState("Waiting", "warning");
+        showLimitModal(waitMessage);
+        const waitStateKey = `${job.id}:${job.retry_at || ""}:${job.resume_row || ""}`;
+        if (!alertedWaitStates.has(waitStateKey)) {
+            alertedWaitStates.add(waitStateKey);
+            window.alert(waitMessage);
+        }
+        return { done: false, delayMs: retryDelay };
     }
 
     if (job.status === "failed") {
-        clearInterval(pollTimer);
-        pollTimer = null;
+        clearPollTimer();
         resetSubmitButton("Retry batch");
         submitStatus.textContent = job.error || "Batch failed.";
         setRunState("Failed", "error");
-        return true;
+        return { done: true };
     }
 
-    return false;
+    return { done: false, delayMs: 1000 };
 }
 
-async function startPolling(jobId) {
-    const isTerminal = await pollJob(jobId);
-    if (!isTerminal && !pollTimer) {
-        pollTimer = window.setInterval(() => {
-            pollJob(jobId).catch((error) => {
-                clearInterval(pollTimer);
-                pollTimer = null;
-                submitStatus.textContent = error.message;
-                setRunState("Failed", "error");
-                resetSubmitButton("Retry batch");
-            });
-        }, 1000);
-    }
-}
-
-async function handleSubmit(event) {
-    event.preventDefault();
-
-    if (!excelFile.files.length) {
-        window.alert("please enter employee data excel");
-        submitStatus.textContent = "please enter employee data excel";
-        excelFile.focus();
-        return;
-    }
-
-    if (!form.checkValidity()) {
-        form.reportValidity();
-        submitStatus.textContent = "Complete the required fields before starting.";
-        return;
-    }
-
-    const formData = new FormData(form);
-
-    clearInterval(pollTimer);
-    pollTimer = null;
-    hideLimitModal();
-    hideSuccessModal();
-    setFormDisabled(true);
-    submitBtn.disabled = true;
-    submitBtn.classList.add("is-loading");
-    submitLabel.textContent = "Processing";
-    submitStatus.textContent = "Starting batch.";
-    setRunState("Running", "running");
-    setProgress({ sent: 0, total: 0, message: "Uploading workbook.", current: "" });
-
-    try {
-        const response = await fetch(form.action, {
-            method: "POST",
-            body: formData,
-            headers: { Accept: "application/json" },
-        });
-        const payload = await readJsonResponse(response);
-
-        if (!response.ok) {
-            throw new Error(payload.error || "Batch could not be started.");
-        }
-
-        submitStatus.textContent = "Batch started. Tracking payslips as they send.";
-        await startPolling(payload.jobId);
-    } catch (error) {
-        submitStatus.textContent = error.message;
-        setRunState("Failed", "error");
-        resetSubmitButton("Retry batch");
-    }
-}
-
-function initPayslipUi() {
-    if (!form || !options) {
-        return;
-    }
-
-    cacheDefaultFileLabels();
-    updateVisibleFields();
-
-    options.addEventListener("change", updateVisibleFields);
-    form.addEventListener("submit", handleSubmit);
-    limitModalClose.addEventListener("click", hideLimitModal);
-    successModalClose.addEventListener("click", hideSuccessModal);
-
-    form.querySelectorAll("input[type='file']").forEach((input) => {
-        input.addEventListener("change", () => updateFileLabel(input));
-    });
-}
-
-initPayslipUi();
+function schedulePoll(jobId, delayMs) {
+    pollTimer = window.setTimeout(async 
