@@ -15,6 +15,8 @@ const progressTrack = document.querySelector(".progress-track");
 const progressBar = document.querySelector("#progressBar");
 const runState = document.querySelector(".run-state");
 const limitModal = document.querySelector("#limitModal");
+const limitModalTitle = document.querySelector("#limitModalTitle");
+const limitModalMessage = document.querySelector("#limitModalMessage");
 const limitModalClose = document.querySelector("#limitModalClose");
 const successModal = document.querySelector("#successModal");
 const successModalClose = document.querySelector("#successModalClose");
@@ -99,7 +101,9 @@ function resetSubmitButton(label = "Start batch") {
     updateVisibleFields();
 }
 
-function showLimitModal() {
+function showLimitModal(message) {
+    limitModalTitle.textContent = "batch stopped at email limit";
+    limitModalMessage.textContent = message;
     limitModal.hidden = false;
     limitModalClose.focus();
 }
@@ -141,37 +145,46 @@ async function pollJob(jobId) {
     if (job.status === "complete") {
         clearInterval(pollTimer);
         pollTimer = null;
+        resetSubmitButton("Start another batch");
         submitStatus.textContent = "all payslips generated and sent";
         progressMessage.textContent = "all payslips generated and sent";
         setRunState("Complete", "success");
         showSuccessModal();
-        resetSubmitButton("Start another batch");
-        return;
+        return true;
     }
 
     if (job.status === "limited") {
         clearInterval(pollTimer);
         pollTimer = null;
-        submitStatus.textContent = "hit limit, please retry in five minutes";
-        progressMessage.textContent = "hit limit, please retry in five minutes";
-        setRunState("Limit hit", "warning");
-        showLimitModal();
+        const sent = Number(job.sent || 0);
+        const total = Number(job.total || 0);
+        const retryText = job.message || "Email provider stopped sending. Please retry later.";
+        const limitMessage = total > 0
+            ? `Stopped after sending ${sent} of ${total}. ${retryText}`
+            : retryText;
         resetSubmitButton("Retry batch");
-        return;
+        submitStatus.textContent = limitMessage;
+        progressMessage.textContent = limitMessage;
+        setRunState("Limit hit", "warning");
+        showLimitModal(limitMessage);
+        return true;
     }
 
     if (job.status === "failed") {
         clearInterval(pollTimer);
         pollTimer = null;
+        resetSubmitButton("Retry batch");
         submitStatus.textContent = job.error || "Batch failed.";
         setRunState("Failed", "error");
-        resetSubmitButton("Retry batch");
+        return true;
     }
+
+    return false;
 }
 
 async function startPolling(jobId) {
-    await pollJob(jobId);
-    if (!pollTimer) {
+    const isTerminal = await pollJob(jobId);
+    if (!isTerminal && !pollTimer) {
         pollTimer = window.setInterval(() => {
             pollJob(jobId).catch((error) => {
                 clearInterval(pollTimer);
@@ -204,6 +217,8 @@ async function handleSubmit(event) {
 
     clearInterval(pollTimer);
     pollTimer = null;
+    hideLimitModal();
+    hideSuccessModal();
     setFormDisabled(true);
     submitBtn.disabled = true;
     submitBtn.classList.add("is-loading");

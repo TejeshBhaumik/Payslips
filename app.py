@@ -40,6 +40,7 @@ import uuid
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
+logging.getLogger("werkzeug").setLevel(logging.WARNING)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 JOBS = {}
 JOBS_LOCK = threading.Lock()
@@ -147,13 +148,14 @@ def run_extract_job(job_id, form_data, excel_bytes, excel_filename, excel_conten
             current="",
         )
         app.logger.info("Batch %s completed.", job_id)
-    except sendEmail.RateLimitExceeded:
-        app.logger.warning("Batch %s stopped because the email limit was hit.", job_id)
+    except sendEmail.RateLimitExceeded as e:
+        message = str(e) or "Email provider stopped sending. Please retry later."
+        app.logger.warning("Batch %s stopped by the SMTP provider: %s", job_id, message)
         update_job(
             job_id,
             status="limited",
-            error="hit limit, please retry in five minutes",
-            message="hit limit, please retry in five minutes",
+            error=message,
+            message=message,
             current="",
         )
     except Exception as e:

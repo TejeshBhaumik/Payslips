@@ -18,7 +18,3 @@ services:
         sync: false
       - key: SMTP_DEBUG
         value: "0"
-      - key: MAX_EMAILS_PER_BATCH
-        value: "30"
-      - key: RATE_LIMIT_COOLDOWN_SECONDS
-        value: "300"

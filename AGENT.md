@@ -65,18 +65,18 @@ The frontend should stay on the first page and show:
 - A loading/progress bar while payslips are being generated and sent.
 - Per-payslip progress such as `Sent payslip 3 of 12`.
 - `all payslips generated and sent` when the job completes.
-- A popup saying `hit limit, please retry in five minutes` when the send limit is reached.
+- A popup saying how many messages were sent when the SMTP provider stops the batch because of throttling or quota.
 
 ## Rate Limit Behavior
 
-`sendEmail.reserve_send_slot()` raises `RateLimitExceeded` when the batch has hit `MAX_EMAILS_PER_BATCH`.
+`sendEmail.emailDelivery()` raises `RateLimitExceeded` only when the SMTP provider returns a throttling or quota-style response.
 
 That exception is intentionally surfaced as a job status:
 
 ```json
 {
   "status": "limited",
-  "message": "hit limit, please retry in five minutes"
+  "message": "Email provider stopped sending. Please retry later."
 }
 ```
 

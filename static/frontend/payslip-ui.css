@@ -576,6 +576,13 @@ h3 {
     line-height: 1.18;
 }
 
+.modal-copy {
+    margin: -10px 0 22px;
+    color: var(--muted);
+    font-size: 14px;
+    line-height: 1.45;
+}
+
 .modal-panel .submit-btn {
     min-width: 118px;
 }

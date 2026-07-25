@@ -2,8 +2,6 @@
 import logging
 import os
 import smtplib
-import threading
-import time
 import ssl
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -18,45 +16,36 @@ SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
 SMTP_USER = os.environ.get("SMTP_USER", "hr@conacent.com")
 SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "").strip()
 SMTP_DEBUG = os.environ.get("SMTP_DEBUG", "0").strip().lower() in {"1", "true", "yes", "on"}
-MAX_EMAILS_PER_BATCH = int(os.environ.get("MAX_EMAILS_PER_BATCH", "30"))
-RATE_LIMIT_COOLDOWN_SECONDS = int(os.environ.get("RATE_LIMIT_COOLDOWN_SECONDS", "300"))
-
-_send_lock = threading.Lock()
-_sent_in_batch = 0
-_limit_started_at = None
 
 
 class RateLimitExceeded(Exception):
-    """Raised when the SMTP batch cooldown should stop the current request."""
+    """Raised when the SMTP provider rejects sending because of throttling or quota."""
 
 
-def reserve_send_slot():
-    global _sent_in_batch, _limit_started_at
-    with _send_lock:
-        if MAX_EMAILS_PER_BATCH > 0 and _sent_in_batch > 0 and _sent_in_batch % MAX_EMAILS_PER_BATCH == 0:
-            now = time.monotonic()
-            if _limit_started_at is None:
-                _limit_started_at = now
-            elif now - _limit_started_at >= RATE_LIMIT_COOLDOWN_SECONDS:
-                _sent_in_batch = 0
-                _limit_started_at = None
-            else:
-                logger.info(
-                    "Sent %d emails; rate limit still active for %.1f seconds",
-                    _sent_in_batch,
-                    RATE_LIMIT_COOLDOWN_SECONDS - (now - _limit_started_at),
-                )
-                raise RateLimitExceeded("hit limit, please retry in five minutes")
+SMTP_RATE_LIMIT_CODES = {421, 450, 451, 452, 454}
+SMTP_RATE_LIMIT_TERMS = (
+    "rate",
+    "limit",
+    "quota",
+    "throttle",
+    "too many",
+    "temporarily unavailable",
+    "try again later",
+    "daily",
+    "hourly",
+)
 
-        if MAX_EMAILS_PER_BATCH > 0 and _sent_in_batch > 0 and _sent_in_batch % MAX_EMAILS_PER_BATCH == 0:
-            logger.info(
-                "Sent %d emails; rate limit reached for %d seconds",
-                _sent_in_batch,
-                RATE_LIMIT_COOLDOWN_SECONDS,
-            )
-            raise RateLimitExceeded("hit limit, please retry in five minutes")
 
-        _sent_in_batch += 1
+def _decode_smtp_error(error):
+    message = error.smtp_error
+    if isinstance(message, bytes):
+        return message.decode("utf-8", errors="replace")
+    return str(message)
+
+
+def _is_smtp_rate_limit(error):
+    message = _decode_smtp_error(error).lower()
+    return error.smtp_code in SMTP_RATE_LIMIT_CODES or any(term in message for term in SMTP_RATE_LIMIT_TERMS)
 
 
 def resolve_smtp_credentials(smtp_user=None, smtp_password=None):
@@ -70,34 +59,31 @@ def resolve_smtp_credentials(smtp_user=None, smtp_password=None):
 
 
 def emailDelivery(smtp_user, smtp_password, message, receiver):
-    reserve_send_slot()
-    logger.info(
-        "SMTP send starting host=%s port=%s sender=%s receiver=%s subject=%s",
-        SMTP_HOST,
-        SMTP_PORT,
-        smtp_user,
-        receiver,
-        message.get("Subject", ""),
-    )
-
     context = ssl.create_default_context()
     try:
         with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as session:
             session.set_debuglevel(1 if SMTP_DEBUG else 0)
-            logger.info("SMTP connection established")
             session.ehlo()
             session.starttls(context=context)
-            logger.info("SMTP STARTTLS complete")
             session.ehlo()
 
-            logger.info("SMTP login attempt sender=%s", smtp_user)
             session.login(smtp_user, smtp_password)
-            logger.info("SMTP login success sender=%s", smtp_user)
 
             text = message.as_string()
-            logger.info("SMTP sendmail starting receiver=%s", receiver)
             session.sendmail(smtp_user, receiver, text)
-            logger.info("SMTP sendmail success receiver=%s", receiver)
+    except smtplib.SMTPResponseException as e:
+        if _is_smtp_rate_limit(e):
+            smtp_message = _decode_smtp_error(e).strip()
+            logger.warning(
+                "SMTP provider stopped sending sender=%s receiver=%s code=%s error=%s",
+                smtp_user,
+                receiver,
+                e.smtp_code,
+                smtp_message,
+            )
+            raise RateLimitExceeded("Email provider stopped sending. Please retry later.") from e
+        logger.exception("SMTP delivery failed sender=%s receiver=%s", smtp_user, receiver)
+        raise
     except Exception:
         logger.exception("SMTP delivery failed sender=%s receiver=%s", smtp_user, receiver)
         raise
@@ -246,7 +232,6 @@ def sendEmailWithPDF(
 
     payload = MIMEBase('application', 'octate-stream', Name=pdfname)
     payload.set_payload(pdf_bytes)
-    logger.info("Prepared PDF attachment name=%s size_bytes=%d", pdfname, len(pdf_bytes))
 
     # enconding the binary into base64
     encoders.encode_base64(payload)
@@ -254,5 +239,4 @@ def sendEmailWithPDF(
     # add header with pdf name
     payload.add_header('Content-Disposition', 'attachment', filename=pdfname)
     message.attach(payload)
-    logger.info("Dispatching PDF email recipient=%s subject=%s", receiver, message.get("Subject", ""))
     emailDelivery(sender, password, message, receiver)
