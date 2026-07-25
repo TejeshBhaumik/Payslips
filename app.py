@@ -384,4 +384,102 @@ def create_payslip():
             # create a PdfFileWriter object
             out = PdfFileWriter()
 
-            # Read the ge
+            # Read the generated PDF from memory
+            filename = PdfFileReader(pdf_buffer)
+            out.appendPagesFromReader(filename)
+            is_pan = ""
+            # print(is_encrypted)
+            if is_encrypted == "on":
+                
+                # print("trigger")
+                password = vals[5]
+                out.encrypt(user_pwd = password)
+                is_pan = "Please use your PAN number as the password for opening the pdf document."
+
+            out_buffer = BytesIO()
+            out.write(out_buffer)
+            out_buffer.seek(0)
+            pdf_bytes = out_buffer.getvalue()
+            pdf_buffer.close()
+            out_buffer.close()
+
+
+            i += 1
+            year = vals[0]
+            if (year != "N/A"):
+                pdf_send_index += 1
+                app.logger.info(
+                    "About to send PDF email row=%s pdf=%s recipient=%s sender=%s",
+                    i,
+                    name,
+                    email,
+                    smtp_email,
+                )
+                app.logger.info(
+                    "PDF progress %s/%s row=%s smtp_host=%s smtp_port=%s",
+                    pdf_send_index,
+                    pdf_send_total,
+                    i,
+                    sendEmail.SMTP_HOST,
+                    sendEmail.SMTP_PORT,
+                )
+                try:
+                    sendEmail.sendEmailWithPDF(
+                        pdf_bytes=pdf_bytes,
+                        pdf_name=name,
+                        email=email,
+                        month=str(vals[0]),
+                        person_name=str(vals[1]),
+                        email_file_body=email_file_body,
+                        is_pan=is_pan,
+                        smtp_user=smtp_email,
+                        smtp_password=smtp_password,
+                    )
+                except Exception as e:
+                    app.logger.exception("Failed sending PDF email for %s", name)
+                    return f"Email send failed for {name}: {e}", 400
+
+          
+    # if (year != "N/A"):
+    #     merge_pdfs(year)
+            #Saving the pdf file\
+    return "Salary slips have been sent", 200
+    # return send_file('sample.zip')
+        
+# def merge_pdfs(year):
+
+#     files_dir = 'C:\\Users\\tejes\Desktop\conacent\payslips' 
+#     SOURCE_DIR = 'C:\\Users\\tejes\Desktop\conacent\payslips' 
+
+
+
+
+#     import os 
+#     from os import path
+#     # Directory 
+        
+#     # Parent Directory path 
+        
+#     DEST_DIR = 'C:\\Users\\tejes\Desktop\conacent\payslips\payslipsFolder ' + year 
+#     # Path 
+#     p = os.path.normpath(DEST_DIR)
+#     if path.exists(p):
+#         shutil.rmtree(p, ignore_errors = False) 
+#     os.mkdir(p) 
+
+
+#     pdf_files = [f for f in os.listdir(files_dir) if f.endswith('.pdf')] #Get all files in the directory that end with '.pdf'
+#     merger = PdfFileMerger() #Create an empty file
+#     for fname in pdf_files:
+
+#         #merger.append(PdfFileReader(os.path.join(files_dir,filename),'rb')) #Add every pdf to the empty file
+#         #erger.write(PdfFileReader(os.path.join('C:\\Users\\tejes\Desktop\conacent\payslipsFolder',filename))) #Save the file
+#         shutil.move(os.path.join(SOURCE_DIR, fname), DEST_DIR)
+    
+#     shutil.rmtree(p, ignore_errors = False) 
+
+#create_payslip()
+#merge_pdfs()
+
+if __name__ == "__main__":
+    app.run(debug = True, threaded=True, port = int(os.environ.get('PORT', 5000)))

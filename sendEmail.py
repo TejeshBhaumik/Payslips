@@ -170,4 +170,69 @@ def sendEmailWithImage(
             <p class="name">Pranabesh Bhaumik</p>
             <p class="title">Director</p>
             <p class="company">Conacent Consulting Pvt Ltd</p>
-            <p class="address"
+            <p class="address">CF-90 Salt Lake, Sector 1<br>Kolkata - 700064, INDIA</p>
+            <p class="phone">Ph: +91 98300 79710</p>
+            <p class="website"><a href="http://www.conacent.com" target="_blank">www.conacent.com</a></p>
+            </div>
+
+            </body>
+            </html>
+    '''
+
+
+    message.attach(MIMEText(body, 'plain'))
+    message.attach(MIMEText(email_signature, 'html'))
+    emailDelivery(sender, password, message, receiver)
+
+    
+
+
+
+
+
+
+
+def sendEmailWithPDF(
+    pdf_bytes,
+    pdf_name,
+    email,
+    month,
+    person_name,
+    email_file_body,
+    is_pan,
+    smtp_user=None,
+    smtp_password=None,
+):
+
+    body = f''' Dear {person_name}, 
+                Please find attached the {email_file_body} {month}.
+                {is_pan}
+                HR'''
+    # put your email here
+    sender, password = resolve_smtp_credentials(smtp_user, smtp_password)
+    # put the email of the receiver here
+    receiver = email
+      
+    #Setup the MIME
+    message = MIMEMultipart()
+    message['From'] = sender
+    message['To'] = receiver
+    message["Bcc"] = sender
+    message['Subject'] = f' {month}'
+
+    message.attach(MIMEText(body, 'plain'))
+
+    pdfname = pdf_name
+
+    payload = MIMEBase('application', 'octate-stream', Name=pdfname)
+    payload.set_payload(pdf_bytes)
+    logger.info("Prepared PDF attachment name=%s size_bytes=%d", pdfname, len(pdf_bytes))
+
+    # enconding the binary into base64
+    encoders.encode_base64(payload)
+
+    # add header with pdf name
+    payload.add_header('Content-Disposition', 'attachment', filename=pdfname)
+    message.attach(payload)
+    logger.info("Dispatching PDF email recipient=%s subject=%s", receiver, message.get("Subject", ""))
+    emailDelivery(sender, password, message, receiver)
