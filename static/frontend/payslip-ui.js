@@ -208,4 +208,107 @@ async function pollJob(jobId) {
 }
 
 function schedulePoll(jobId, delayMs) {
-    pollTimer = window.setTimeout(async 
+    pollTimer = window.setTimeout(async () => {
+        try {
+            const result = await pollJob(jobId);
+            if (!result.done) {
+                schedulePoll(jobId, result.delayMs || 1000);
+            }
+        } catch (error) {
+            clearPollTimer();
+            submitStatus.textContent = error.message;
+            setRunState("Failed", "error");
+            resetSubmitButton("Retry batch");
+        }
+    }, delayMs);
+}
+
+async function startPolling(jobId) {
+    const result = await pollJob(jobId);
+    if (!result.done && !pollTimer) {
+        schedulePoll(jobId, result.delayMs || 1000);
+    }
+}
+
+async function handleSubmit(event) {
+    event.preventDefault();
+
+    if (!excelFile.files.length) {
+        window.alert("please enter employee data excel");
+        submitStatus.textContent = "please enter employee data excel";
+        excelFile.focus();
+        return;
+    }
+
+    if (!form.checkValidity()) {
+        form.reportValidity();
+        submitStatus.textContent = "Complete the required fields before starting.";
+        return;
+    }
+
+    const formData = new FormData(form);
+
+    clearPollTimer();
+    hideLimitModal();
+    hideSuccessModal();
+    setFormDisabled(true);
+    submitBtn.disabled = true;
+    submitBtn.classList.add("is-loading");
+    submitLabel.textContent = "Processing";
+    submitStatus.textContent = "Starting batch.";
+    setRunState("Running", "running");
+    setProgress({ sent: 0, total: 0, message: "Uploading workbook.", current: "" });
+
+    try {
+        const response = await fetch(form.action, {
+            method: "POST",
+            body: formData,
+            headers: { Accept: "application/json" },
+        });
+        const payload = await readJsonResponse(response);
+
+        if (!response.ok) {
+            throw new Error(payload.error || "Batch could not be started.");
+        }
+
+        submitStatus.textContent = "Batch started. Tracking payslips as they send.";
+        await startPolling(payload.jobId);
+    } catch (error) {
+        submitStatus.textContent = error.message;
+        setRunState("Failed", "error");
+        resetSubmitButton("Retry batch");
+    }
+}
+
+function initPayslipUi() {
+    if (!form || !options) {
+        return;
+    }
+
+    cacheDefaultFileLabels();
+    updateVisibleFields();
+
+    options.addEventListener("change", updateVisibleFields);
+    form.addEventListener("submit", handleSubmit);
+    limitModalClose.addEventListener("click", hideLimitModal);
+    successModalClose.addEventListener("click", hideSuccessModal);
+
+    form.querySelectorAll("input[type='file']").forEach((input) => {
+        input.addEventListener("change", () => updateFileLabel(input));
+    });
+
+    const jobId = new URLSearchParams(window.location.search).get("jobId");
+    if (jobId) {
+        setFormDisabled(true);
+        submitBtn.disabled = true;
+        submitBtn.classList.add("is-loading");
+        submitLabel.textContent = "Processing";
+        submitStatus.textContent = "Batch started. Tracking payslips as they send.";
+        setRunState("Running", "running");
+        setProgress({ sent: 0, total: 0, message: "Loading batch status.", current: "" });
+        startPolling(jobId);
+        window.history.replaceState({}, "", window.location.pathname);
+    }
+}
+
+initPayslipUi();

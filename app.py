@@ -29,7 +29,7 @@ from reportlab.lib.pagesizes import A4, A5, letter
 from reportlab.platypus import TableStyle
 from reportlab.lib import colors
 
-from flask import Flask, render_template, request, jsonify, send_file
+from flask import Flask, render_template, request, jsonify, send_file, redirect, url_for
 from zipfile import ZipFile
 from io import BytesIO
 import os
@@ -160,6 +160,9 @@ def create_payslip():
         daemon=True,
     )
     thread.start()
+
+    if "application/json" not in request.headers.get("Accept", ""):
+        return redirect(url_for("index", jobId=job_id), code=303)
 
     return jsonify({"jobId": job_id}), 202
 
