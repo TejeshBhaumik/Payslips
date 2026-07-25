@@ -22,7 +22,7 @@ class RateLimitExceeded(Exception):
     """Raised when the SMTP provider rejects sending because of throttling or quota."""
 
 
-SMTP_RATE_LIMIT_CODES = {421, 450, 451, 452, 454}
+SMTP_RATE_LIMIT_CODES = {421, 451, 452, 454}
 SMTP_RATE_LIMIT_TERMS = (
     "rate",
     "limit",
@@ -48,6 +48,14 @@ def _is_smtp_rate_limit(error):
     return error.smtp_code in SMTP_RATE_LIMIT_CODES or any(term in message for term in SMTP_RATE_LIMIT_TERMS)
 
 
+def _is_recipient_rate_limit(error):
+    for code, message in error.recipients.values():
+        text = message.decode("utf-8", errors="replace") if isinstance(message, bytes) else str(message)
+        if code in SMTP_RATE_LIMIT_CODES or any(term in text.lower() for term in SMTP_RATE_LIMIT_TERMS):
+            return True
+    return False
+
+
 def resolve_smtp_credentials(smtp_user=None, smtp_password=None):
     user = (smtp_user or SMTP_USER).strip()
     password = (smtp_password or SMTP_PASSWORD).strip()
@@ -71,6 +79,17 @@ def emailDelivery(smtp_user, smtp_password, message, receiver):
 
             text = message.as_string()
             session.sendmail(smtp_user, receiver, text)
+    except smtplib.SMTPRecipientsRefused as e:
+        if _is_recipient_rate_limit(e):
+            logger.warning(
+                "SMTP provider stopped sending sender=%s receiver=%s recipients=%s",
+                smtp_user,
+                receiver,
+                e.recipients,
+            )
+            raise RateLimitExceeded("Email provider stopped sending. Please retry later.") from e
+        logger.exception("SMTP delivery failed sender=%s receiver=%s", smtp_user, receiver)
+        raise
     except smtplib.SMTPResponseException as e:
         if _is_smtp_rate_limit(e):
             smtp_message = _decode_smtp_error(e).strip()
