@@ -23,18 +23,38 @@ RATE_LIMIT_COOLDOWN_SECONDS = int(os.environ.get("RATE_LIMIT_COOLDOWN_SECONDS", 
 
 _send_lock = threading.Lock()
 _sent_in_batch = 0
+_limit_started_at = None
+
+
+class RateLimitExceeded(Exception):
+    """Raised when the SMTP batch cooldown should stop the current request."""
 
 
 def reserve_send_slot():
-    global _sent_in_batch
+    global _sent_in_batch, _limit_started_at
     with _send_lock:
-        if _sent_in_batch > 0 and _sent_in_batch % MAX_EMAILS_PER_BATCH == 0:
+        if MAX_EMAILS_PER_BATCH > 0 and _sent_in_batch > 0 and _sent_in_batch % MAX_EMAILS_PER_BATCH == 0:
+            now = time.monotonic()
+            if _limit_started_at is None:
+                _limit_started_at = now
+            elif now - _limit_started_at >= RATE_LIMIT_COOLDOWN_SECONDS:
+                _sent_in_batch = 0
+                _limit_started_at = None
+            else:
+                logger.info(
+                    "Sent %d emails; rate limit still active for %.1f seconds",
+                    _sent_in_batch,
+                    RATE_LIMIT_COOLDOWN_SECONDS - (now - _limit_started_at),
+                )
+                raise RateLimitExceeded("hit limit, please retry in five minutes")
+
+        if MAX_EMAILS_PER_BATCH > 0 and _sent_in_batch > 0 and _sent_in_batch % MAX_EMAILS_PER_BATCH == 0:
             logger.info(
-                "Sent %d emails; sleeping %d seconds before continuing",
+                "Sent %d emails; rate limit reached for %d seconds",
                 _sent_in_batch,
                 RATE_LIMIT_COOLDOWN_SECONDS,
             )
-            time.sleep(RATE_LIMIT_COOLDOWN_SECONDS)
+            raise RateLimitExceeded("hit limit, please retry in five minutes")
 
         _sent_in_batch += 1
 

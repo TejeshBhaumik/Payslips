@@ -17,7 +17,7 @@ from reportlab.pdfbase.ttfonts import TTFont
 
 from reportlab.lib.units import inch, cm
 import os
-from PyPDF2 import PdfFileReader, PdfFileMerger, PdfFileWriter
+from PyPDF2 import PdfReader, PdfWriter
 
 from reportlab.lib import pdfencrypt
 
@@ -35,9 +35,42 @@ from io import BytesIO
 import os
 import requests
 import logging
+import threading
+import uuid
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+JOBS = {}
+JOBS_LOCK = threading.Lock()
+
+
+def create_job():
+    job_id = uuid.uuid4().hex
+    with JOBS_LOCK:
+        JOBS[job_id] = {
+            "id": job_id,
+            "status": "queued",
+            "sent": 0,
+            "total": 0,
+            "current": "",
+            "message": "Preparing batch.",
+            "error": "",
+        }
+    return job_id
+
+
+def update_job(job_id, **changes):
+    if not job_id:
+        return
+    with JOBS_LOCK:
+        if job_id in JOBS:
+            JOBS[job_id].update(changes)
+
+
+def get_job(job_id):
+    with JOBS_LOCK:
+        return JOBS.get(job_id)
 
 
 def count_rows_to_send(sheet, start_row=3):
@@ -56,58 +89,127 @@ def index():
 def healthz():
     return "ok", 200
 
-@app.route('/extract', methods=["POST"])
+@app.route('/favicon.ico')
+def favicon():
+    return "", 204
 
+@app.route('/extract', methods=["POST"])
 def create_payslip():
+    form_data = request.form.to_dict()
+    excel_file = request.files.get('excelFile')
+    image_file = request.files.get('image')
+
+    if excel_file is None or excel_file.filename == "":
+        app.logger.error("No excelFile uploaded. file_keys=%s", list(request.files.keys()))
+        return jsonify({"error": "No Excel file was uploaded."}), 400
+
+    job_id = create_job()
+    excel_bytes = excel_file.read()
+    excel_filename = excel_file.filename
+    excel_content_type = excel_file.content_type
+    image_filename = image_file.filename if image_file and image_file.filename else ""
+
+    thread = threading.Thread(
+        target=run_extract_job,
+        args=(job_id, form_data, excel_bytes, excel_filename, excel_content_type, image_filename),
+        daemon=True,
+    )
+    thread.start()
+
+    return jsonify({"jobId": job_id}), 202
+
+
+@app.route('/extract/status/<job_id>')
+def extract_status(job_id):
+    job = get_job(job_id)
+    if job is None:
+        return jsonify({"error": "Batch not found."}), 404
+    return jsonify(job)
+
+
+def run_extract_job(job_id, form_data, excel_bytes, excel_filename, excel_content_type, image_filename):
+    try:
+        message, status_code = run_extract_sync(
+            form_data,
+            excel_bytes,
+            excel_filename,
+            excel_content_type,
+            image_filename,
+            job_id,
+        )
+        if status_code >= 400:
+            update_job(job_id, status="failed", error=message, message=message)
+            return
+        update_job(
+            job_id,
+            status="complete",
+            message="all payslips generated and sent",
+            current="",
+        )
+    except sendEmail.RateLimitExceeded:
+        app.logger.info("Batch %s stopped because the email limit was hit", job_id)
+        update_job(
+            job_id,
+            status="limited",
+            error="hit limit, please retry in five minutes",
+            message="hit limit, please retry in five minutes",
+            current="",
+        )
+    except Exception as e:
+        app.logger.exception("Batch %s failed", job_id)
+        update_job(job_id, status="failed", error=str(e), message=str(e), current="")
+
+
+def run_extract_sync(form_data, excel_bytes, excel_filename, excel_content_type, image_filename, job_id):
 
     app.logger.info(
         "POST /extract received: form_keys=%s file_keys=%s content_length=%s",
-        list(request.form.keys()),
-        list(request.files.keys()),
-        request.content_length,
+        list(form_data.keys()),
+        ["excelFile"] + (["image"] if image_filename else []),
+        len(excel_bytes),
     )
 
     #this was changed
     #convert the font so it is compatible
-    pdfmetrics.registerFont(TTFont('Arial','arial.ttf'))
+    pdfmetrics.registerFont(TTFont('Arial', os.path.join(BASE_DIR, 'arial.ttf')))
     file_header = ""
     bottom_label = ""
     email_file_body = ""
-    is_encrypted = request.form.get('encrypt')
+    is_encrypted = form_data.get('encrypt')
 
-    option = request.form.get('options')
-    smtp_email = request.form.get('smtpEmail', "")
-    smtp_password = request.form.get('smtpPassword', "")
+    option = form_data.get('options')
+    smtp_email = form_data.get('smtpEmail', "")
+    smtp_password = form_data.get('smtpPassword', "")
     app.logger.info("Selected option=%s encrypt=%s", option, is_encrypted)
     app.logger.info("SMTP login supplied=%s sender_email=%s", bool(smtp_email), smtp_email)
+    if option not in {"custom", "salarySlip", "emailOnly"}:
+        app.logger.error("Invalid workflow option=%s", option)
+        return "Please choose a workflow before starting the batch.", 400
     
     # Handle the uploaded file and form inputs here
     # Example: Save the file, process it, etc.
 
-
-    r = request.files.get('excelFile')
-    if r is None or r.filename == "":
-        app.logger.error("No excelFile uploaded. file_keys=%s", list(request.files.keys()))
+    if not excel_bytes:
+        app.logger.error("No excelFile uploaded.")
         return "No Excel file was uploaded.", 400
-    app.logger.info("Uploaded excelFile filename=%s content_type=%s", r.filename, r.content_type)
+    app.logger.info("Uploaded excelFile filename=%s content_type=%s", excel_filename, excel_content_type)
     
 
     if option == 'custom':
-        file_header = request.form['field1']
-        bottom_label = request.form['field2']
-        email_file_body = request.form['field3']
+        file_header = form_data['field1']
+        bottom_label = form_data['field2']
+        email_file_body = form_data['field3']
         # Handle custom fields data
     
     if option == "emailOnly":
 
-        image_file = request.files.get('image')
-        img = image_file.filename if image_file and image_file.filename else ""
-        sender = request.form.get('field11', "")
-        sender_title = request.form.get('field12', "")
-        company = request.form.get('field13', "")
-        com_address = request.form.get('field14', "")
-        ph_number = request.form.get('field15', "")
-        com_email = request.form.get('field16', "")
+        img = image_filename
+        sender = form_data.get('field11', "")
+        sender_title = form_data.get('field12', "")
+        company = form_data.get('field13', "")
+        com_address = form_data.get('field14', "")
+        ph_number = form_data.get('field15', "")
+        com_email = form_data.get('field16', "")
         app.logger.info(
             "emailOnly fields: image_filename=%s sender=%s sender_title=%s company=%s website=%s",
             img,
@@ -131,7 +233,7 @@ def create_payslip():
 
     #import the sheet from the excel file
     try:
-        wb = openpyxl.load_workbook(r, data_only=True)
+        wb = openpyxl.load_workbook(BytesIO(excel_bytes), data_only=True)
         sheet = wb[wb.sheetnames[0]]
         # Print or log information to inspect the workbook and sheet
         app.logger.info(
@@ -149,12 +251,24 @@ def create_payslip():
     if option == "emailOnly":
         email_send_total = count_rows_to_send(sheet, start_row=1)
         email_send_index = 0
+        update_job(
+            job_id,
+            status="running",
+            total=email_send_total,
+            sent=0,
+            message="Sending email batch.",
+        )
         for row_number, row in enumerate(sheet, start=1):
             name = row[0]
             email = row[1]
             app.logger.info("emailOnly row=%s name=%s email=%s", row_number, name.value, email.value)
             try:
                 email_send_index += 1
+                update_job(
+                    job_id,
+                    current=str(email.value),
+                    message=f"Sending {email_send_index} of {email_send_total}",
+                )
                 app.logger.info(
                     "About to send emailOnly message row=%s recipient=%s sender=%s",
                     row_number,
@@ -182,11 +296,19 @@ def create_payslip():
                     smtp_user=smtp_email,
                     smtp_password=smtp_password,
                 )
+                update_job(
+                    job_id,
+                    sent=email_send_index,
+                    current=str(email.value),
+                    message=f"Sent {email_send_index} of {email_send_total}",
+                )
 
+            except sendEmail.RateLimitExceeded:
+                raise
             except Exception as e:
                 app.logger.exception("emailOnly send failed at row=%s", row_number)
                 return f"Email send failed at row {row_number}: {e}", 400
-        return "done", 200
+        return "all payslips generated and sent", 200
 
 
 
@@ -204,7 +326,7 @@ def create_payslip():
     #Payslip variables
     company_name = 'Conacent Consulting'
 
-    logo = Image("logo and address.png")
+    logo = Image(os.path.join(BASE_DIR, "logo and address.png"))
     logo._restrictSize(6*inch,8*inch)
     logo.hAlign = "LEFT"
     logo.VALIGN = "TOP"
@@ -225,6 +347,13 @@ def create_payslip():
     emails = []
     pdf_send_total = count_rows_to_send(sheet, start_row=3)
     pdf_send_index = 0
+    update_job(
+        job_id,
+        status="running",
+        total=pdf_send_total,
+        sent=0,
+        message="Generating and sending payslips.",
+    )
     while (i):
         vals = []
         password = ""
@@ -381,19 +510,18 @@ def create_payslip():
             pdf.build(elements)
             pdf_buffer.seek(0)
 
-            # create a PdfFileWriter object
-            out = PdfFileWriter()
+            out = PdfWriter()
 
             # Read the generated PDF from memory
-            filename = PdfFileReader(pdf_buffer)
-            out.appendPagesFromReader(filename)
+            filename = PdfReader(pdf_buffer)
+            out.append_pages_from_reader(filename)
             is_pan = ""
             # print(is_encrypted)
             if is_encrypted == "on":
                 
                 # print("trigger")
                 password = vals[5]
-                out.encrypt(user_pwd = password)
+                out.encrypt(password)
                 is_pan = "Please use your PAN number as the password for opening the pdf document."
 
             out_buffer = BytesIO()
@@ -408,6 +536,11 @@ def create_payslip():
             year = vals[0]
             if (year != "N/A"):
                 pdf_send_index += 1
+                update_job(
+                    job_id,
+                    current=name,
+                    message=f"Sending payslip {pdf_send_index} of {pdf_send_total}",
+                )
                 app.logger.info(
                     "About to send PDF email row=%s pdf=%s recipient=%s sender=%s",
                     i,
@@ -435,51 +568,20 @@ def create_payslip():
                         smtp_user=smtp_email,
                         smtp_password=smtp_password,
                     )
+                    update_job(
+                        job_id,
+                        sent=pdf_send_index,
+                        current=name,
+                        message=f"Sent payslip {pdf_send_index} of {pdf_send_total}",
+                    )
+                except sendEmail.RateLimitExceeded:
+                    raise
                 except Exception as e:
                     app.logger.exception("Failed sending PDF email for %s", name)
                     return f"Email send failed for {name}: {e}", 400
 
           
-    # if (year != "N/A"):
-    #     merge_pdfs(year)
-            #Saving the pdf file\
-    return "Salary slips have been sent", 200
-    # return send_file('sample.zip')
+    return "all payslips generated and sent", 200
         
-# def merge_pdfs(year):
-
-#     files_dir = 'C:\\Users\\tejes\Desktop\conacent\payslips' 
-#     SOURCE_DIR = 'C:\\Users\\tejes\Desktop\conacent\payslips' 
-
-
-
-
-#     import os 
-#     from os import path
-#     # Directory 
-        
-#     # Parent Directory path 
-        
-#     DEST_DIR = 'C:\\Users\\tejes\Desktop\conacent\payslips\payslipsFolder ' + year 
-#     # Path 
-#     p = os.path.normpath(DEST_DIR)
-#     if path.exists(p):
-#         shutil.rmtree(p, ignore_errors = False) 
-#     os.mkdir(p) 
-
-
-#     pdf_files = [f for f in os.listdir(files_dir) if f.endswith('.pdf')] #Get all files in the directory that end with '.pdf'
-#     merger = PdfFileMerger() #Create an empty file
-#     for fname in pdf_files:
-
-#         #merger.append(PdfFileReader(os.path.join(files_dir,filename),'rb')) #Add every pdf to the empty file
-#         #erger.write(PdfFileReader(os.path.join('C:\\Users\\tejes\Desktop\conacent\payslipsFolder',filename))) #Save the file
-#         shutil.move(os.path.join(SOURCE_DIR, fname), DEST_DIR)
-    
-#     shutil.rmtree(p, ignore_errors = False) 
-
-#create_payslip()
-#merge_pdfs()
-
 if __name__ == "__main__":
     app.run(debug = True, threaded=True, port = int(os.environ.get('PORT', 5000)))

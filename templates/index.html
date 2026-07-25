@@ -1,189 +1,206 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-    <title>Form for Excel and Inputs</title>
-    <link rel="stylesheet" type="text/css" href="static/index.css?t=[timestamp]">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Payslip Operations</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='frontend/payslip-ui.css') }}">
+    <script type="module" src="{{ url_for('static', filename='frontend/payslip-ui.js') }}" defer></script>
 </head>
 <body>
-
-    <div class="container">
-
-        
-        <form id="payslipForm" action="/extract" method="post" enctype="multipart/form-data">
-
-            <h2>Email Login</h2>
-            <label for="smtpEmail">Enter email address</label>
-            <input type="email" id="smtpEmail" name="smtpEmail" class="textfield" autocomplete="username" required />
-            <br/><br/>
-
-            <label for="smtpPassword">Enter password</label>
-            <input type="password" id="smtpPassword" name="smtpPassword" class="textfield" autocomplete="current-password" required />
-            <br/><br/>
-
-            <h2>Upload Excel Form (Only for options that require one)</h2>
-            <input type="file" name="excelFile" accept=".xls,.xlsx, .csv" />
-            <br/><br/>
-            
-            <h2>Choose function type</h2>
-            <label for="options"></label>
-            <select id="options" name="options">
-                <option value="default">Select...</option>
-                <option value="custom">Custom</option>
-                <option value="salarySlip">Salary Slip</option>
-                <option value="emailOnly">Email with optional image</option>
-            </select><br><br>
-
-
-            <div id="customFields" style="display:none;">
-                <label for="field1">Enter first line for file</label>
-                <input type="text" id="field1" name="field1" class="textfield" />
-                <br/><br/>
-
-                <label for="field2">Enter bottom label</label>
-                <input type="text" id="field2" name="field2" class="textfield" />
-                <br/><br/>
-
-                <label for="field3">Enter body of email after "Please find attached the"</label>
-                <input type="text" id="field3" name="field3" class="textfield" />
-                <br/><br/>
-
-                <label for="field4">Field 4:</label>
-                <input type="text" id="field4" name="field4" class="textfield" />
-                <br/><br/>
+    <main class="app-shell">
+        <aside class="sidebar" aria-label="Application overview">
+            <div class="brand-lockup">
+                <div class="brand-mark" aria-hidden="true">P</div>
+                <div>
+                    <p class="eyebrow">Payslip Ops</p>
+                    <h1>Payroll delivery console</h1>
+                </div>
             </div>
 
-
-            <div id="emailOnly" style="display:none;">
-                <label for="image">Upload body image (Optional)</label>
-                <input type="file" id="image" name="image" accept="image/*" /> 
-                <br/><br/>
-
-                <label for="field11">Enter sender name</label>
-                <input type="text" id="field11" name="field11" class="textfield" />
-                <br/><br/>
-
-                <label for="field12">Enter sender title</label>
-                <input type="text" id="field12" name="field12" class="textfield" />
-                <br/><br/>
-
-                <label for="field13">Enter company</label>
-                <input type="text" id="field13" name="field13" placeholder="Conacent Consulting Pvt Ltd" class="textfield" />
-                <br/><br/>
-
-                <label for="field14">Enter address</label>
-                <input type="text" id="field14" name="field14" class="textfield" />
-                <br/><br/>
-
-                <label for="field15">Enter phone number</label>
-                <input type="text" id="field15" name="field15" class="textfield" />
-                <br/><br/>
-
-                <label for="field16">Enter website url</label><br>
-                <input type="url" id="field16" name="field16" placeholder="https://www.conacent.com/" disabled><br><br>
-
+            <div class="status-panel">
+                <span class="status-dot" aria-hidden="true"></span>
+                <div>
+                    <p class="status-label">Batch workflow</p>
+                    <p class="status-copy">Upload workbook, choose the delivery mode, and send the generated documents.</p>
+                </div>
             </div>
 
-            <h2>Password Encryption</h2>
-            <div class="checkbox-input">
-                <label for="encrypt"></label>
-                <input type="checkbox" id="encrypt" name="encrypt" />
-                <br/><br/>
+            <div class="metric-grid" aria-label="Workflow summary">
+                <div>
+                    <span>01</span>
+                    <p>Authenticate sender</p>
+                </div>
+                <div>
+                    <span>02</span>
+                    <p>Map workbook</p>
+                </div>
+                <div>
+                    <span>03</span>
+                    <p>Dispatch emails</p>
+                </div>
+            </div>
+        </aside>
+
+        <section class="workspace" aria-labelledby="pageTitle">
+            <div class="workspace-header">
+                <div>
+                    <p class="eyebrow">Secure batch sender</p>
+                    <h2 id="pageTitle">Prepare a payroll run</h2>
+                </div>
+                <div class="run-state">
+                    <span aria-hidden="true"></span>
+                    Ready
+                </div>
             </div>
 
-            <button type="submit" id="submitBtn" class="submit-btn">
-                <span class="submit-label">Submit</span>
-                <span class="submit-spinner" aria-hidden="true"></span>
-            </button>
-            <div id="submitStatus" class="submit-status" aria-live="polite"></div>
+            <form id="payslipForm" class="payroll-form" action="/extract" method="post" enctype="multipart/form-data">
+                <section class="form-section" aria-labelledby="loginTitle">
+                    <div class="section-heading">
+                        <span class="step-pill">1</span>
+                        <div>
+                            <h3 id="loginTitle">Sender login</h3>
+                            <p>Use the SMTP mailbox that should send this batch.</p>
+                        </div>
+                    </div>
 
-            <script>
-                var form = document.getElementById("payslipForm");
-                var options = document.getElementById("options");
-                var customFields = document.getElementById("customFields");
-                var emailOnlyField = document.getElementById("emailOnly");
-                var field16 = document.getElementById("field16");
-                var submitBtn = document.getElementById("submitBtn");
-                var submitLabel = document.querySelector("#submitBtn .submit-label");
-                var submitStatus = document.getElementById("submitStatus");
+                    <div class="field-grid">
+                        <label class="field">
+                            <span>Email address</span>
+                            <input type="email" id="smtpEmail" name="smtpEmail" autocomplete="username" placeholder="payroll@example.com" required>
+                        </label>
 
-                function setFieldsDisabled(container, disabled) {
-                    container.querySelectorAll("input, select, textarea").forEach(function(input) {
-                        input.disabled = disabled;
-                    });
-                }
+                        <label class="field">
+                            <span>Password</span>
+                            <input type="password" id="smtpPassword" name="smtpPassword" autocomplete="current-password" placeholder="App password" required>
+                        </label>
+                    </div>
+                </section>
 
-                function updateVisibleFields() {
-                    var selectedOption = options.value;
+                <section class="form-section" aria-labelledby="sourceTitle">
+                    <div class="section-heading">
+                        <span class="step-pill">2</span>
+                        <div>
+                            <h3 id="sourceTitle">Source data</h3>
+                            <p>Select the workbook and delivery workflow for this run.</p>
+                        </div>
+                    </div>
 
-                    if (selectedOption === "default" || selectedOption === "salarySlip") {
-                        1customFields.style.display = "none";
-                        emailOnlyField.style.display = "none";
-                        setFieldsDisabled(customFields, true);
-                        setFieldsDisabled(emailOnlyField, true);
-                        field16.required = false;
-                    } else if (selectedOption === "custom") {
-                        customFields.style.display = "block";
-                        emailOnlyField.style.display = "none";
-                        setFieldsDisabled(customFields, false);
-                        setFieldsDisabled(emailOnlyField, true);
-                        field16.required = false;
-                    } else if (selectedOption === "emailOnly") {
-                        emailOnlyField.style.display = "block";
-                        customFields.style.display = "none";
-                        setFieldsDisabled(emailOnlyField, false);
-                        setFieldsDisabled(customFields, true);
-                        field16.required = true;
-                    }
+                    <div class="field-grid">
+                        <label class="field file-field" for="excelFile">
+                            <span>Excel workbook</span>
+                            <input type="file" id="excelFile" name="excelFile" accept=".xls,.xlsx,.csv">
+                            <strong data-file-label="excelFile">Choose .xls, .xlsx, or .csv</strong>
+                        </label>
 
-                    console.log("[payslip-form] option changed", {
-                        selectedOption: selectedOption,
-                        customFieldsVisible: customFields.style.display,
-                        emailOnlyVisible: emailOnlyField.style.display,
-                        websiteRequired: field16.required,
-                        websiteDisabled: field16.disabled
-                    });
-                }
+                        <label class="field">
+                            <span>Workflow type</span>
+                            <select id="options" name="options" required>
+                                <option value="default">Select workflow</option>
+                                <option value="custom">Custom payslip email</option>
+                                <option value="salarySlip">Salary slip</option>
+                                <option value="emailOnly">Email with optional image</option>
+                            </select>
+                        </label>
+                    </div>
+                </section>
 
-                options.addEventListener("change", updateVisibleFields);
+                <section id="customFields" class="form-section conditional-section" aria-labelledby="customTitle" hidden>
+                    <div class="section-heading">
+                        <span class="step-pill">3</span>
+                        <div>
+                            <h3 id="customTitle">Custom payslip copy</h3>
+                            <p>Customize the PDF header, footer note, and email body text.</p>
+                        </div>
+                    </div>
 
-                form.addEventListener("submit", function() {
-                        console.log("[payslip-form] submit clicked", {
-                            option: options.value,
-                            encryptChecked: document.getElementById("encrypt").checked,
-                            excelFileCount: form.elements["excelFile"].files.length,
-                            imageFileCount: form.elements["image"] ? form.elements["image"].files.length : 0,
-                            formValid: form.checkValidity()
-                        });
+                    <div class="field-grid">
+                        <label class="field">
+                            <span>PDF header line</span>
+                            <input type="text" id="field1" name="field1" placeholder="Payslip for the month of">
+                        </label>
+                        <label class="field">
+                            <span>Footer note</span>
+                            <input type="text" id="field2" name="field2" placeholder="Confidential payroll document">
+                        </label>
+                        <label class="field field-wide">
+                            <span>Email body phrase</span>
+                            <input type="text" id="field3" name="field3" placeholder="salary slip for the month of">
+                        </label>
+                        <label class="field field-wide">
+                            <span>Additional reference</span>
+                            <input type="text" id="field4" name="field4" placeholder="Optional internal reference">
+                        </label>
+                    </div>
+                </section>
 
-                    if (!form.checkValidity()) {
-                        console.warn("[payslip-form] submit blocked by browser validation");
-                        return;
-                    }
+                <section id="emailOnly" class="form-section conditional-section" aria-labelledby="emailOnlyTitle" hidden>
+                    <div class="section-heading">
+                        <span class="step-pill">3</span>
+                        <div>
+                            <h3 id="emailOnlyTitle">Email signature</h3>
+                            <p>Add sender details for image-based email campaigns.</p>
+                        </div>
+                    </div>
 
-                    submitBtn.disabled = true;
-                    submitBtn.classList.add("is-loading");
-                    submitLabel.textContent = "Processing...";
-                    submitStatus.textContent = "Generating and sending PDFs. Keep this tab open.";
-                });
+                    <div class="field-grid">
+                        <label class="field file-field" for="image">
+                            <span>Body image</span>
+                            <input type="file" id="image" name="image" accept="image/*">
+                            <strong data-file-label="image">Optional image upload</strong>
+                        </label>
+                        <label class="field">
+                            <span>Sender name</span>
+                            <input type="text" id="field11" name="field11" placeholder="Jane Smith">
+                        </label>
+                        <label class="field">
+                            <span>Sender title</span>
+                            <input type="text" id="field12" name="field12" placeholder="Payroll Manager">
+                        </label>
+                        <label class="field">
+                            <span>Company</span>
+                            <input type="text" id="field13" name="field13" placeholder="Conacent Consulting Pvt Ltd">
+                        </label>
+                        <label class="field field-wide">
+                            <span>Address</span>
+                            <input type="text" id="field14" name="field14" placeholder="Office address">
+                        </label>
+                        <label class="field">
+                            <span>Phone number</span>
+                            <input type="text" id="field15" name="field15" placeholder="+91 00000 00000">
+                        </label>
+                        <label class="field">
+                            <span>Website URL</span>
+                            <input type="url" id="field16" name="field16" placeholder="https://www.conacent.com/" disabled>
+                        </label>
+                    </div>
+                </section>
 
-                form.querySelectorAll("input, select, textarea").forEach(function(input) {
-                    input.addEventListener("invalid", function() {
-                        console.warn("[payslip-form] invalid field", {
-                            name: input.name,
-                            id: input.id,
-                            value: input.type === "password" ? "[redacted]" : input.type === "file" ? input.files.length + " file(s)" : input.value,
-                            validationMessage: input.validationMessage
-                        });
-                    });
-                });
+                <section class="form-section compact-section" aria-labelledby="securityTitle">
+                    <div class="section-heading">
+                        <span class="step-pill">4</span>
+                        <div>
+                            <h3 id="securityTitle">Security</h3>
+                            <p>Optionally protect generated PDFs with the PAN value from the workbook.</p>
+                        </div>
+                    </div>
 
-                updateVisibleFields();
-            </script>
+                    <label class="toggle-row">
+                        <input type="checkbox" id="encrypt" name="encrypt">
+                        <span class="toggle-control" aria-hidden="true"></span>
+                        <span>
+                            <strong>Password encrypt PDFs</strong>
+                            <small>Recipients use their PAN number to open the document.</small>
+                        </span>
+                    </label>
+                </section>
 
-            </div>
+                <footer class="form-actions">
+                    <div id="submitStatus" class="submit-status" aria-live="polite"></div>
+                    <button type="submit" id="submitBtn" class="submit-btn">
+                        <span class="submit-label">Start batch</span>
+                        <span class="submit-spinner" aria-hidden="true"></span>
+                    </button>
+                </footer>
 
-        </form>
-    </div>
-
-</body>
-</html>
+                <section id="progressPanel" class="progress-panel"
