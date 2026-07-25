@@ -100,8 +100,8 @@ def create_payslip():
     image_file = request.files.get('image')
 
     if excel_file is None or excel_file.filename == "":
-        app.logger.error("No excelFile uploaded. file_keys=%s", list(request.files.keys()))
-        return jsonify({"error": "No Excel file was uploaded."}), 400
+        app.logger.warning("No employee data file uploaded.")
+        return jsonify({"error": "please enter employee data excel"}), 400
 
     job_id = create_job()
     excel_bytes = excel_file.read()
@@ -146,8 +146,9 @@ def run_extract_job(job_id, form_data, excel_bytes, excel_filename, excel_conten
             message="all payslips generated and sent",
             current="",
         )
+        app.logger.info("Batch %s completed.", job_id)
     except sendEmail.RateLimitExceeded:
-        app.logger.info("Batch %s stopped because the email limit was hit", job_id)
+        app.logger.warning("Batch %s stopped because the email limit was hit.", job_id)
         update_job(
             job_id,
             status="limited",
@@ -162,13 +163,6 @@ def run_extract_job(job_id, form_data, excel_bytes, excel_filename, excel_conten
 
 def run_extract_sync(form_data, excel_bytes, excel_filename, excel_content_type, image_filename, job_id):
 
-    app.logger.info(
-        "POST /extract received: form_keys=%s file_keys=%s content_length=%s",
-        list(form_data.keys()),
-        ["excelFile"] + (["image"] if image_filename else []),
-        len(excel_bytes),
-    )
-
     #this was changed
     #convert the font so it is compatible
     pdfmetrics.registerFont(TTFont('Arial', os.path.join(BASE_DIR, 'arial.ttf')))
@@ -180,19 +174,17 @@ def run_extract_sync(form_data, excel_bytes, excel_filename, excel_content_type,
     option = form_data.get('options')
     smtp_email = form_data.get('smtpEmail', "")
     smtp_password = form_data.get('smtpPassword', "")
-    app.logger.info("Selected option=%s encrypt=%s", option, is_encrypted)
-    app.logger.info("SMTP login supplied=%s sender_email=%s", bool(smtp_email), smtp_email)
     if option not in {"custom", "salarySlip", "emailOnly"}:
-        app.logger.error("Invalid workflow option=%s", option)
+        app.logger.warning("Invalid workflow option=%s", option)
         return "Please choose a workflow before starting the batch.", 400
     
     # Handle the uploaded file and form inputs here
     # Example: Save the file, process it, etc.
 
     if not excel_bytes:
-        app.logger.error("No excelFile uploaded.")
-        return "No Excel file was uploaded.", 400
-    app.logger.info("Uploaded excelFile filename=%s content_type=%s", excel_filename, excel_content_type)
+        app.logger.warning("No employee data file uploaded.")
+        return "please enter employee data excel", 400
+    app.logger.info("Batch %s started. option=%s file=%s bytes=%d", job_id, option, excel_filename, len(excel_bytes))
     
 
     if option == 'custom':
@@ -210,14 +202,6 @@ def run_extract_sync(form_data, excel_bytes, excel_filename, excel_content_type,
         com_address = form_data.get('field14', "")
         ph_number = form_data.get('field15', "")
         com_email = form_data.get('field16', "")
-        app.logger.info(
-            "emailOnly fields: image_filename=%s sender=%s sender_title=%s company=%s website=%s",
-            img,
-            sender,
-            sender_title,
-            company,
-            com_email,
-        )
     
     if option == 'salarySlip':
         file_header = "Salary slip for the month of"
@@ -225,31 +209,17 @@ def run_extract_sync(form_data, excel_bytes, excel_filename, excel_content_type,
         bottom_label = "The figures in the salary slip are confidential and not to be disclosed.\
               Signature is not required for this payslip"
 
-    
-    app.logger.info("Starting workbook load for option=%s", option)
-
-
-    
-
     #import the sheet from the excel file
     try:
         wb = openpyxl.load_workbook(BytesIO(excel_bytes), data_only=True)
         sheet = wb[wb.sheetnames[0]]
-        # Print or log information to inspect the workbook and sheet
-        app.logger.info(
-            "Workbook loaded: sheets=%s active_sheet=%s dimensions=%s",
-            wb.sheetnames,
-            sheet.title,
-            sheet.dimensions,
-        )
-        # Add more print statements to inspect the data
     except Exception as e:
         app.logger.exception("Error loading workbook")
         return f"Error loading workbook: {e}", 400
 
-    app.logger.info("Workbook processing started for option=%s", option)
     if option == "emailOnly":
         email_send_total = count_rows_to_send(sheet, start_row=1)
+        app.logger.info("Batch %s loaded workbook. rows=%d workflow=emailOnly", job_id, email_send_total)
         email_send_index = 0
         update_job(
             job_id,
@@ -261,27 +231,12 @@ def run_extract_sync(form_data, excel_bytes, excel_filename, excel_content_type,
         for row_number, row in enumerate(sheet, start=1):
             name = row[0]
             email = row[1]
-            app.logger.info("emailOnly row=%s name=%s email=%s", row_number, name.value, email.value)
             try:
                 email_send_index += 1
                 update_job(
                     job_id,
                     current=str(email.value),
                     message=f"Sending {email_send_index} of {email_send_total}",
-                )
-                app.logger.info(
-                    "About to send emailOnly message row=%s recipient=%s sender=%s",
-                    row_number,
-                    email.value,
-                    smtp_email,
-                )
-                app.logger.info(
-                    "EmailOnly progress %s/%s row=%s smtp_host=%s smtp_port=%s",
-                    email_send_index,
-                    email_send_total,
-                    row_number,
-                    sendEmail.SMTP_HOST,
-                    sendEmail.SMTP_PORT,
                 )
                 sendEmail.sendEmailWithImage(
                     str(name.value),
@@ -315,7 +270,6 @@ def run_extract_sync(form_data, excel_bytes, excel_filename, excel_content_type,
 
 
 
-    #print(sheet.cell(4,1).value)
     #Page information
     page_width = 2156
     page_height = 3050
@@ -346,6 +300,7 @@ def run_extract_sync(form_data, excel_bytes, excel_filename, excel_content_type,
     i = 3
     emails = []
     pdf_send_total = count_rows_to_send(sheet, start_row=3)
+    app.logger.info("Batch %s loaded workbook. rows=%d workflow=%s", job_id, pdf_send_total, option)
     pdf_send_index = 0
     update_job(
         job_id,
@@ -377,8 +332,6 @@ def run_extract_sync(form_data, excel_bytes, excel_filename, excel_content_type,
                     date = inp[inp.rfind("-") + 1: ]
                     inp = date + "/" + month + "/" + y
                     inp = inp.replace(" ","")             
-                if ("#" in inp):
-                    print("this date of joining is weird")
                 if "@" in inp:
                     emails.append(inp)
                 else :
@@ -516,10 +469,7 @@ def run_extract_sync(form_data, excel_bytes, excel_filename, excel_content_type,
             filename = PdfReader(pdf_buffer)
             out.append_pages_from_reader(filename)
             is_pan = ""
-            # print(is_encrypted)
             if is_encrypted == "on":
-                
-                # print("trigger")
                 password = vals[5]
                 out.encrypt(password)
                 is_pan = "Please use your PAN number as the password for opening the pdf document."
@@ -540,21 +490,6 @@ def run_extract_sync(form_data, excel_bytes, excel_filename, excel_content_type,
                     job_id,
                     current=name,
                     message=f"Sending payslip {pdf_send_index} of {pdf_send_total}",
-                )
-                app.logger.info(
-                    "About to send PDF email row=%s pdf=%s recipient=%s sender=%s",
-                    i,
-                    name,
-                    email,
-                    smtp_email,
-                )
-                app.logger.info(
-                    "PDF progress %s/%s row=%s smtp_host=%s smtp_port=%s",
-                    pdf_send_index,
-                    pdf_send_total,
-                    i,
-                    sendEmail.SMTP_HOST,
-                    sendEmail.SMTP_PORT,
                 )
                 try:
                     sendEmail.sendEmailWithPDF(

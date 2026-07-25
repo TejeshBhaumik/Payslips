@@ -29,15 +29,15 @@
             <div class="metric-grid" aria-label="Workflow summary">
                 <div>
                     <span>01</span>
-                    <p>Authenticate sender</p>
+                    <p>Enter your email and password for sending files</p>
                 </div>
                 <div>
                     <span>02</span>
-                    <p>Map workbook</p>
+                    <p>Enter your workbook</p>
                 </div>
                 <div>
                     <span>03</span>
-                    <p>Dispatch emails</p>
+                    <p>Generat files and email them</p>
                 </div>
             </div>
         </aside>
@@ -203,4 +203,37 @@
                     </button>
                 </footer>
 
-                <section id="progressPanel" class="progress-panel"
+                <section id="progressPanel" class="progress-panel" aria-labelledby="progressTitle" hidden>
+                    <div class="progress-copy">
+                        <div>
+                            <h3 id="progressTitle">Batch progress</h3>
+                            <p id="progressMessage">Preparing batch.</p>
+                        </div>
+                        <strong id="progressCount">0 / 0</strong>
+                    </div>
+                    <div class="progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+                        <span id="progressBar"></span>
+                    </div>
+                    <p id="progressCurrent" class="progress-current"></p>
+                </section>
+            </form>
+        </section>
+    </main>
+
+    <div id="limitModal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="limitModalTitle" hidden>
+        <div class="modal-panel">
+            <p class="eyebrow">Batch paused</p>
+            <h2 id="limitModalTitle">hit limit, please retry in five minutes</h2>
+            <button type="button" id="limitModalClose" class="submit-btn">Close</button>
+        </div>
+    </div>
+
+    <div id="successModal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="successModalTitle" hidden>
+        <div class="modal-panel">
+            <p class="eyebrow">Batch complete</p>
+            <h2 id="successModalTitle">salary slips have been generated and sent</h2>
+            <button type="button" id="successModalClose" class="submit-btn">Close</button>
+        </div>
+    </div>
+</body>
+</html>
