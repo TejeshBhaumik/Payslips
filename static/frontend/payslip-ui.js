@@ -260,7 +260,7 @@ async function handleSubmit(event) {
     setProgress({ sent: 0, total: 0, message: "Uploading workbook.", current: "" });
 
     try {
-        const response = await fetch(form.action, {
+        const response = await fetch(form.dataset.extractUrl, {
             method: "POST",
             body: formData,
             headers: { Accept: "application/json" },
@@ -296,19 +296,6 @@ function initPayslipUi() {
     form.querySelectorAll("input[type='file']").forEach((input) => {
         input.addEventListener("change", () => updateFileLabel(input));
     });
-
-    const jobId = new URLSearchParams(window.location.search).get("jobId");
-    if (jobId) {
-        setFormDisabled(true);
-        submitBtn.disabled = true;
-        submitBtn.classList.add("is-loading");
-        submitLabel.textContent = "Processing";
-        submitStatus.textContent = "Batch started. Tracking payslips as they send.";
-        setRunState("Running", "running");
-        setProgress({ sent: 0, total: 0, message: "Loading batch status.", current: "" });
-        startPolling(jobId);
-        window.history.replaceState({}, "", window.location.pathname);
-    }
 }
 
 initPayslipUi();

@@ -16,9 +16,14 @@ SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
 SMTP_USER = os.environ.get("SMTP_USER", "hr@conacent.com")
 SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "").strip()
 SMTP_DEBUG = os.environ.get("SMTP_DEBUG", "0").strip().lower() in {"1", "true", "yes", "on"}
+SMTP_TIMEOUT_SECONDS = int(os.environ.get("SMTP_TIMEOUT_SECONDS", "60"))
 
 
-class RateLimitExceeded(Exception):
+class EmailRetryNeeded(Exception):
+    """Raised when email delivery should pause and retry from the same row."""
+
+
+class RateLimitExceeded(EmailRetryNeeded):
     """Raised when the SMTP provider rejects sending because of throttling or quota."""
 
 
@@ -69,7 +74,7 @@ def resolve_smtp_credentials(smtp_user=None, smtp_password=None):
 def emailDelivery(smtp_user, smtp_password, message, receiver):
     context = ssl.create_default_context()
     try:
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as session:
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=SMTP_TIMEOUT_SECONDS) as session:
             session.set_debuglevel(1 if SMTP_DEBUG else 0)
             session.ehlo()
             session.starttls(context=context)
@@ -103,6 +108,15 @@ def emailDelivery(smtp_user, smtp_password, message, receiver):
             raise RateLimitExceeded("Email provider stopped sending. Please retry later.") from e
         logger.exception("SMTP delivery failed sender=%s receiver=%s", smtp_user, receiver)
         raise
+    except TimeoutError as e:
+        logger.warning(
+            "SMTP connection timed out sender=%s receiver=%s host=%s port=%s",
+            smtp_user,
+            receiver,
+            SMTP_HOST,
+            SMTP_PORT,
+        )
+        raise EmailRetryNeeded("Email server connection timed out. Retrying later.") from e
     except Exception:
         logger.exception("SMTP delivery failed sender=%s receiver=%s", smtp_user, receiver)
         raise

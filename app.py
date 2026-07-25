@@ -29,7 +29,7 @@ from reportlab.lib.pagesizes import A4, A5, letter
 from reportlab.platypus import TableStyle
 from reportlab.lib import colors
 
-from flask import Flask, render_template, request, jsonify, send_file, redirect, url_for
+from flask import Flask, render_template, request, jsonify, send_file
 from zipfile import ZipFile
 from io import BytesIO
 import os
@@ -101,9 +101,14 @@ def schedule_retry(
     retry_at = datetime.now(timezone.utc) + timedelta(seconds=SMTP_RETRY_DELAY_SECONDS)
     job = get_job(job_id) or {}
     retry_count = int(job.get("retry_count") or 0) + 1
+    retry_delay_label = (
+        f"{SMTP_RETRY_DELAY_SECONDS // 60} minutes"
+        if SMTP_RETRY_DELAY_SECONDS >= 60
+        else f"{SMTP_RETRY_DELAY_SECONDS} seconds"
+    )
     message = (
         f"Email provider stopped sending. Retrying from Excel row {resume_row} "
-        f"in {SMTP_RETRY_DELAY_SECONDS // 60} minutes."
+        f"in {retry_delay_label}."
     )
     update_job(
         job_id,
@@ -161,9 +166,6 @@ def create_payslip():
     )
     thread.start()
 
-    if "application/json" not in request.headers.get("Accept", ""):
-        return redirect(url_for("index", jobId=job_id), code=303)
-
     return jsonify({"jobId": job_id}), 202
 
 
@@ -206,7 +208,7 @@ def run_extract_job(
             current="",
         )
         app.logger.info("Batch %s completed.", job_id)
-    except sendEmail.RateLimitExceeded as e:
+    except sendEmail.EmailRetryNeeded as e:
         resume_row = getattr(e, "excel_row", start_row)
         sent = getattr(e, "sent", sent_so_far)
         if resume_row is None:
@@ -347,7 +349,7 @@ def run_extract_sync(
                     message=f"Sent {email_send_index} of {email_send_total}",
                 )
 
-            except sendEmail.RateLimitExceeded as e:
+            except sendEmail.EmailRetryNeeded as e:
                 email_send_index -= 1
                 e.excel_row = row_number
                 e.sent = email_send_index
@@ -576,7 +578,6 @@ def run_extract_sync(
             out_buffer.close()
 
 
-            i += 1
             year = vals[0]
             if (year != "N/A"):
                 pdf_send_index += 1
@@ -603,7 +604,7 @@ def run_extract_sync(
                         current=name,
                         message=f"Sent payslip {pdf_send_index} of {pdf_send_total}",
                     )
-                except sendEmail.RateLimitExceeded as e:
+                except sendEmail.EmailRetryNeeded as e:
                     pdf_send_index -= 1
                     e.excel_row = row_number
                     e.sent = pdf_send_index
@@ -611,6 +612,7 @@ def run_extract_sync(
                 except Exception as e:
                     app.logger.exception("Failed sending PDF email for %s", name)
                     return f"Email send failed for {name}: {e}", 400
+        i += 1
 
           
     return "all payslips generated and sent", 200

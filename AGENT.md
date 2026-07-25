@@ -62,6 +62,7 @@ Because those can happen at the same time, `JOBS_LOCK` makes reads and writes ta
 
 The frontend should stay on the first page and show:
 
+- The user should never be navigated to `/extract`, never see raw JSON, and never see a `jobId` in the address bar.
 - A loading/progress bar while payslips are being generated and sent.
 - Per-payslip progress such as `Sent payslip 3 of 12`.
 - `all payslips generated and sent` when the job completes.
