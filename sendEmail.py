@@ -74,16 +74,21 @@ def resolve_smtp_credentials(smtp_user=None, smtp_password=None):
 def emailDelivery(smtp_user, smtp_password, message, receiver):
     context = ssl.create_default_context()
     try:
+        logger.info("SMTP connecting host=%s port=%s receiver=%s", SMTP_HOST, SMTP_PORT, receiver)
         with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=SMTP_TIMEOUT_SECONDS) as session:
             session.set_debuglevel(1 if SMTP_DEBUG else 0)
             session.ehlo()
+            logger.info("SMTP connected; starting TLS receiver=%s", receiver)
             session.starttls(context=context)
             session.ehlo()
 
+            logger.info("SMTP logging in sender=%s receiver=%s", smtp_user, receiver)
             session.login(smtp_user, smtp_password)
 
             text = message.as_string()
+            logger.info("SMTP sending message receiver=%s subject=%s", receiver, message.get("Subject", ""))
             session.sendmail(smtp_user, receiver, text)
+            logger.info("SMTP sent message receiver=%s", receiver)
     except smtplib.SMTPRecipientsRefused as e:
         if _is_recipient_rate_limit(e):
             logger.warning(

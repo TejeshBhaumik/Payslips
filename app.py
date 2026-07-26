@@ -64,13 +64,24 @@ def write_job_state(job):
     with open(tmp_path, "w", encoding="utf-8") as f:
         json.dump(job, f)
     os.replace(tmp_path, path)
+    app.logger.info(
+        "Job %s persisted status=%s sent=%s total=%s current=%s",
+        job.get("id"),
+        job.get("status"),
+        job.get("sent"),
+        job.get("total"),
+        job.get("current"),
+    )
 
 
 def read_job_state(job_id):
     try:
         with open(job_state_path(job_id), "r", encoding="utf-8") as f:
-            return json.load(f)
+            job = json.load(f)
+            app.logger.info("Job %s loaded from disk status=%s sent=%s", job_id, job.get("status"), job.get("sent"))
+            return job
     except FileNotFoundError:
+        app.logger.warning("Job %s not found in memory or disk", job_id)
         return None
 
 
@@ -90,6 +101,7 @@ def create_job():
             "retry_count": 0,
         }
         write_job_state(JOBS[job_id])
+        app.logger.info("Job %s created", job_id)
     return job_id
 
 
@@ -100,6 +112,8 @@ def update_job(job_id, **changes):
         if job_id in JOBS:
             JOBS[job_id].update(changes)
             write_job_state(JOBS[job_id])
+        else:
+            app.logger.warning("Job %s update skipped; job not found. changes=%s", job_id, sorted(changes.keys()))
 
 
 def get_job(job_id):
@@ -150,7 +164,13 @@ def schedule_retry(
         error="",
         current=f"Excel row {resume_row}",
     )
-    app.logger.warning("Batch %s paused at Excel row %s; retrying at %s", job_id, resume_row, retry_at.isoformat())
+    app.logger.warning(
+        "Batch %s paused at Excel row %s after sent=%s; retrying at %s",
+        job_id,
+        resume_row,
+        sent,
+        retry_at.isoformat(),
+    )
 
     timer = threading.Timer(
         SMTP_RETRY_DELAY_SECONDS,
@@ -197,7 +217,15 @@ def create_payslip():
     excel_content_type = excel_file.content_type
     image_filename = image_file.filename if image_file and image_file.filename else ""
 
-    JOB_EXECUTOR.submit(run_extract_job, job_id, form_data, excel_bytes, excel_filename, excel_content_type, image_filename)
+    app.logger.info(
+        "POST /extract accepted job=%s option=%s filename=%s bytes=%d",
+        job_id,
+        form_data.get("options"),
+        excel_filename,
+        len(excel_bytes),
+    )
+    future = JOB_EXECUTOR.submit(run_extract_job, job_id, form_data, excel_bytes, excel_filename, excel_content_type, image_filename)
+    app.logger.info("Job %s submitted to executor future=%s", job_id, id(future))
 
     return jsonify({"jobId": job_id}), 202
 
@@ -207,6 +235,14 @@ def extract_status(job_id):
     job = get_job(job_id)
     if job is None:
         return jsonify({"error": "Batch not found."}), 404
+    app.logger.info(
+        "GET /extract/status/%s status=%s sent=%s total=%s current=%s",
+        job_id,
+        job.get("status"),
+        job.get("sent"),
+        job.get("total"),
+        job.get("current"),
+    )
     return jsonify(job)
 
 
@@ -220,6 +256,7 @@ def run_extract_job(
     start_row=None,
     sent_so_far=0,
 ):
+    app.logger.info("Job %s worker started start_row=%s sent_so_far=%s", job_id, start_row, sent_so_far)
     try:
         message, status_code = run_extract_sync(
             form_data,
@@ -355,6 +392,13 @@ def run_extract_sync(
             if name.value is None:
                 break
             email = sheet.cell(row=row_number, column=2)
+            app.logger.info(
+                "Job %s emailOnly row=%s send_index=%s recipient=%s",
+                job_id,
+                row_number,
+                email_send_index + 1,
+                email.value,
+            )
             try:
                 email_send_index += 1
                 update_job(
@@ -384,6 +428,13 @@ def run_extract_sync(
 
             except sendEmail.EmailRetryNeeded as e:
                 email_send_index -= 1
+                app.logger.warning(
+                    "Job %s emailOnly paused at row=%s sent=%s reason=%s",
+                    job_id,
+                    row_number,
+                    email_send_index,
+                    e,
+                )
                 e.excel_row = row_number
                 e.sent = email_send_index
                 raise
@@ -476,6 +527,7 @@ def run_extract_sync(
                     )
 
         if str(vals[2]) != 'x' and str(vals[2]) != 'N/A' and type(vals[0]) == str:
+            app.logger.info("Job %s building PDF row=%s name=%s recipient=%s", job_id, row_number, name, email)
             data = []
             elements = [logo]
             for j in range(len(vals)):
@@ -619,6 +671,15 @@ def run_extract_sync(
                     current=name,
                     message=f"Sending payslip {pdf_send_index} of {pdf_send_total}",
                 )
+                app.logger.info(
+                    "Job %s sending PDF row=%s send_index=%s/%s pdf=%s recipient=%s",
+                    job_id,
+                    row_number,
+                    pdf_send_index,
+                    pdf_send_total,
+                    name,
+                    email,
+                )
                 try:
                     sendEmail.sendEmailWithPDF(
                         pdf_bytes=pdf_bytes,
@@ -639,6 +700,13 @@ def run_extract_sync(
                     )
                 except sendEmail.EmailRetryNeeded as e:
                     pdf_send_index -= 1
+                    app.logger.warning(
+                        "Job %s paused at row=%s sent=%s reason=%s",
+                        job_id,
+                        row_number,
+                        pdf_send_index,
+                        e,
+                    )
                     e.excel_row = row_number
                     e.sent = pdf_send_index
                     raise
