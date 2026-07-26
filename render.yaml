@@ -17,22 +17,4 @@ services:
       - key: SMTP_PORT
         value: "2525"
       - key: SMTP_USER
-        sync: false
-      - key: SMTP_PASSWORD
-        sync: false
-      - key: SMTP_DEBUG
-        value: "0"
-      - key: SMTP_RETRY_DELAY_SECONDS
-        value: "600"
-      - key: SMTP_TIMEOUT_SECONDS
-        value: "50"
-      - key: IMAP_HOST
-        value: mail.conacent.com
-      - key: IMAP_PORT
-        value: "993"
-      - key: IMAP_SENT_FOLDER
-        value: Sent
-      - key: JOB_STATE_DIR
-        value: /tmp/payslips_jobs
-      - key: JOB_WORKER_THREADS
-        value: "2"
+        sy
