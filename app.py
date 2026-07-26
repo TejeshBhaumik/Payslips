@@ -37,6 +37,9 @@ import requests
 import logging
 import threading
 import uuid
+import json
+import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
 app = Flask(__name__)
@@ -44,8 +47,31 @@ logging.basicConfig(level=logging.INFO)
 logging.getLogger("werkzeug").setLevel(logging.WARNING)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SMTP_RETRY_DELAY_SECONDS = int(os.environ.get("SMTP_RETRY_DELAY_SECONDS", "600"))
+JOB_STATE_DIR = os.environ.get("JOB_STATE_DIR", os.path.join(tempfile.gettempdir(), "payslips_jobs"))
 JOBS = {}
 JOBS_LOCK = threading.Lock()
+JOB_EXECUTOR = ThreadPoolExecutor(max_workers=int(os.environ.get("JOB_WORKER_THREADS", "2")))
+
+
+def job_state_path(job_id):
+    return os.path.join(JOB_STATE_DIR, f"{job_id}.json")
+
+
+def write_job_state(job):
+    os.makedirs(JOB_STATE_DIR, exist_ok=True)
+    path = job_state_path(job["id"])
+    tmp_path = f"{path}.{uuid.uuid4().hex}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(job, f)
+    os.replace(tmp_path, path)
+
+
+def read_job_state(job_id):
+    try:
+        with open(job_state_path(job_id), "r", encoding="utf-8") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return None
 
 
 def create_job():
@@ -63,6 +89,7 @@ def create_job():
             "retry_at": "",
             "retry_count": 0,
         }
+        write_job_state(JOBS[job_id])
     return job_id
 
 
@@ -72,11 +99,13 @@ def update_job(job_id, **changes):
     with JOBS_LOCK:
         if job_id in JOBS:
             JOBS[job_id].update(changes)
+            write_job_state(JOBS[job_id])
 
 
 def get_job(job_id):
     with JOBS_LOCK:
-        return JOBS.get(job_id)
+        job = JOBS.get(job_id)
+    return job or read_job_state(job_id)
 
 
 def count_rows_to_send(sheet, start_row=3):
@@ -125,8 +154,17 @@ def schedule_retry(
 
     timer = threading.Timer(
         SMTP_RETRY_DELAY_SECONDS,
-        run_extract_job,
-        args=(job_id, form_data, excel_bytes, excel_filename, excel_content_type, image_filename, resume_row, sent),
+        lambda: JOB_EXECUTOR.submit(
+            run_extract_job,
+            job_id,
+            form_data,
+            excel_bytes,
+            excel_filename,
+            excel_content_type,
+            image_filename,
+            resume_row,
+            sent,
+        ),
     )
     timer.daemon = True
     timer.start()
@@ -159,12 +197,7 @@ def create_payslip():
     excel_content_type = excel_file.content_type
     image_filename = image_file.filename if image_file and image_file.filename else ""
 
-    thread = threading.Thread(
-        target=run_extract_job,
-        args=(job_id, form_data, excel_bytes, excel_filename, excel_content_type, image_filename),
-        daemon=True,
-    )
-    thread.start()
+    JOB_EXECUTOR.submit(run_extract_job, job_id, form_data, excel_bytes, excel_filename, excel_content_type, image_filename)
 
     return jsonify({"jobId": job_id}), 202
 
@@ -594,28 +627,4 @@ def run_extract_sync(
                         month=str(vals[0]),
                         person_name=str(vals[1]),
                         email_file_body=email_file_body,
-                        is_pan=is_pan,
-                        smtp_user=smtp_email,
-                        smtp_password=smtp_password,
-                    )
-                    update_job(
-                        job_id,
-                        sent=pdf_send_index,
-                        current=name,
-                        message=f"Sent payslip {pdf_send_index} of {pdf_send_total}",
-                    )
-                except sendEmail.EmailRetryNeeded as e:
-                    pdf_send_index -= 1
-                    e.excel_row = row_number
-                    e.sent = pdf_send_index
-                    raise
-                except Exception as e:
-                    app.logger.exception("Failed sending PDF email for %s", name)
-                    return f"Email send failed for {name}: {e}", 400
-        i += 1
-
-          
-    return "all payslips generated and sent", 200
-        
-if __name__ == "__main__":
-    app.run(debug = True, threaded=True, port = int(os.environ.get('PORT', 5000)))
+                    
