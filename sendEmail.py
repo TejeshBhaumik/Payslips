@@ -27,6 +27,17 @@ SMTP2GO_API_URL = os.environ.get("SMTP2GO_API_URL", "https://api.smtp2go.com/v3/
 IMAP_HOST = os.environ.get("IMAP_HOST", "mail.conacent.com")
 IMAP_PORT = int(os.environ.get("IMAP_PORT", "993"))
 IMAP_SENT_FOLDER = os.environ.get("IMAP_SENT_FOLDER", "Sent")
+IMAP_SENT_FOLDER_CANDIDATES = (
+    IMAP_SENT_FOLDER,
+    "sent",
+    "Sent",
+    "Sent Items",
+    "INBOX.sent",
+    "INBOX.Sent",
+    "INBOX/sent",
+    "INBOX/Sent",
+    "[Gmail]/Sent Mail",
+)
 
 
 class EmailRetryNeeded(Exception):
@@ -106,23 +117,85 @@ def build_mime_message(sender, receiver, subject, text_body, html_body=None, att
     return message
 
 
+def _decode_imap_value(value):
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
+
+
+def _parse_imap_mailbox_name(raw_mailbox):
+    text = _decode_imap_value(raw_mailbox).strip()
+    if not text:
+        return ""
+
+    if text.endswith('"'):
+        start = text.rfind('"', 0, -1)
+        if start != -1:
+            return text[start + 1 : -1]
+
+    return text.rsplit(" ", 1)[-1].strip('"')
+
+
+def _format_imap_mailbox_name(folder_name):
+    if any(char.isspace() for char in folder_name) or folder_name.startswith("["):
+        return '"' + folder_name.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    return folder_name
+
+
+def _find_sent_folder(mailbox):
+    unique_candidates = []
+    for candidate in IMAP_SENT_FOLDER_CANDIDATES:
+        if candidate and candidate not in unique_candidates:
+            unique_candidates.append(candidate)
+
+    status, mailboxes = mailbox.list()
+    if status != "OK" or not mailboxes:
+        logger.warning("IMAP mailbox list failed status=%s data=%s", status, mailboxes)
+        return unique_candidates
+
+    discovered = []
+    for raw_mailbox in mailboxes:
+        text = _decode_imap_value(raw_mailbox)
+        folder_name = _parse_imap_mailbox_name(raw_mailbox)
+        if not folder_name:
+            continue
+        if "\\Sent" in text or folder_name.lower() in {"sent", "sent items", "sent mail"}:
+            discovered.append(folder_name)
+        elif folder_name.lower().endswith((".sent", "/sent")):
+            discovered.append(folder_name)
+
+    for folder_name in discovered:
+        if folder_name not in unique_candidates:
+            unique_candidates.append(folder_name)
+
+    logger.info("IMAP sent-folder candidates=%s", unique_candidates)
+    return unique_candidates
+
+
 def append_to_sent_folder(sender, mailbox_password, message):
     if not mailbox_password:
         logger.info("Skipping IMAP sent-copy append for sender=%s; no mailbox password supplied", sender)
-        return
+        return False
 
     try:
         logger.info("IMAP connecting host=%s port=%s sender=%s", IMAP_HOST, IMAP_PORT, sender)
         with imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT, timeout=SMTP_TIMEOUT_SECONDS) as mailbox:
             mailbox.login(sender, mailbox_password)
             encoded_message = message.as_bytes()
-            status, data = mailbox.append(IMAP_SENT_FOLDER, "\\Seen", imaplib.Time2Internaldate(None), encoded_message)
-            if status != "OK":
-                logger.warning("IMAP append failed sender=%s folder=%s status=%s data=%s", sender, IMAP_SENT_FOLDER, status, data)
-                return
-            logger.info("IMAP appended sent copy sender=%s folder=%s", sender, IMAP_SENT_FOLDER)
+            for folder_name in _find_sent_folder(mailbox):
+                status, data = mailbox.append(
+                    _format_imap_mailbox_name(folder_name),
+                    "\\Seen",
+                    imaplib.Time2Internaldate(None),
+                    encoded_message,
+                )
+                if status == "OK":
+                    logger.info("IMAP appended sent copy sender=%s folder=%s", sender, folder_name)
+                    return True
+                logger.warning("IMAP append failed sender=%s folder=%s status=%s data=%s", sender, folder_name, status, data)
     except Exception:
         logger.exception("IMAP sent-copy append failed sender=%s folder=%s", sender, IMAP_SENT_FOLDER)
+    return False
 
 
 def emailDelivery(auth_user, auth_password, message, receiver):
