@@ -1,8 +1,10 @@
 
 import logging
 import os
+import base64
 import smtplib
 import ssl
+import requests
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.base import MIMEBase
@@ -15,8 +17,11 @@ SMTP_HOST = os.environ.get("SMTP_HOST", "mail.conacent.com")
 SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
 SMTP_USER = os.environ.get("SMTP_USER", "hr@conacent.com")
 SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "").strip()
+SMTP_FROM_EMAIL = os.environ.get("SMTP_FROM_EMAIL", SMTP_USER).strip()
 SMTP_DEBUG = os.environ.get("SMTP_DEBUG", "0").strip().lower() in {"1", "true", "yes", "on"}
-SMTP_TIMEOUT_SECONDS = int(os.environ.get("SMTP_TIMEOUT_SECONDS", "60"))
+SMTP_TIMEOUT_SECONDS = int(os.environ.get("SMTP_TIMEOUT_SECONDS", "20"))
+SMTP2GO_API_KEY = os.environ.get("SMTP2GO_API_KEY", "").strip()
+SMTP2GO_API_URL = os.environ.get("SMTP2GO_API_URL", "https://api.smtp2go.com/v3/email/send")
 
 
 class EmailRetryNeeded(Exception):
@@ -61,17 +66,24 @@ def _is_recipient_rate_limit(error):
     return False
 
 
-def resolve_smtp_credentials(smtp_user=None, smtp_password=None):
-    user = (smtp_user or SMTP_USER).strip()
-    password = (smtp_password or SMTP_PASSWORD).strip()
+def resolve_smtp_credentials():
+    user = SMTP_USER.strip()
+    password = SMTP_PASSWORD.strip()
     if not user:
-        raise ValueError("SMTP user is required. Set SMTP_USER or provide smtpEmail in the form.")
+        raise ValueError("SMTP user is required. Set SMTP_USER in the environment.")
     if not password:
-        raise ValueError("SMTP password is required. Set SMTP_PASSWORD or provide smtpPassword in the form.")
+        raise ValueError("SMTP password is required. Set SMTP_PASSWORD in the environment.")
     return user, password
 
 
-def emailDelivery(smtp_user, smtp_password, message, receiver):
+def resolve_sender_email(form_sender=None):
+    sender = (form_sender or SMTP_FROM_EMAIL).strip()
+    if not sender:
+        raise ValueError("Sender email is required. Set SMTP_FROM_EMAIL or enter a sender email in the form.")
+    return sender
+
+
+def emailDelivery(auth_user, auth_password, message, receiver):
     context = ssl.create_default_context()
     try:
         logger.info("SMTP connecting host=%s port=%s receiver=%s", SMTP_HOST, SMTP_PORT, receiver)
@@ -82,49 +94,119 @@ def emailDelivery(smtp_user, smtp_password, message, receiver):
             session.starttls(context=context)
             session.ehlo()
 
-            logger.info("SMTP logging in sender=%s receiver=%s", smtp_user, receiver)
-            session.login(smtp_user, smtp_password)
+            logger.info("SMTP logging in auth_user=%s receiver=%s", auth_user, receiver)
+            session.login(auth_user, auth_password)
 
             text = message.as_string()
             logger.info("SMTP sending message receiver=%s subject=%s", receiver, message.get("Subject", ""))
-            session.sendmail(smtp_user, receiver, text)
+            session.sendmail(message["From"], receiver, text)
             logger.info("SMTP sent message receiver=%s", receiver)
     except smtplib.SMTPRecipientsRefused as e:
         if _is_recipient_rate_limit(e):
             logger.warning(
                 "SMTP provider stopped sending sender=%s receiver=%s recipients=%s",
-                smtp_user,
+                auth_user,
                 receiver,
                 e.recipients,
             )
             raise RateLimitExceeded("Email provider stopped sending. Please retry later.") from e
-        logger.exception("SMTP delivery failed sender=%s receiver=%s", smtp_user, receiver)
+        logger.exception("SMTP delivery failed auth_user=%s receiver=%s", auth_user, receiver)
         raise
     except smtplib.SMTPResponseException as e:
         if _is_smtp_rate_limit(e):
             smtp_message = _decode_smtp_error(e).strip()
             logger.warning(
                 "SMTP provider stopped sending sender=%s receiver=%s code=%s error=%s",
-                smtp_user,
+                auth_user,
                 receiver,
                 e.smtp_code,
                 smtp_message,
             )
             raise RateLimitExceeded("Email provider stopped sending. Please retry later.") from e
-        logger.exception("SMTP delivery failed sender=%s receiver=%s", smtp_user, receiver)
+        logger.exception("SMTP delivery failed auth_user=%s receiver=%s", auth_user, receiver)
         raise
     except TimeoutError as e:
         logger.warning(
             "SMTP connection timed out sender=%s receiver=%s host=%s port=%s",
-            smtp_user,
+            auth_user,
             receiver,
             SMTP_HOST,
             SMTP_PORT,
         )
         raise EmailRetryNeeded("Email server connection timed out. Retrying later.") from e
     except Exception:
-        logger.exception("SMTP delivery failed sender=%s receiver=%s", smtp_user, receiver)
+        logger.exception("SMTP delivery failed auth_user=%s receiver=%s", auth_user, receiver)
         raise
+
+
+def send_with_smtp2go_api(sender, receiver, subject, text_body, html_body=None, attachments=None):
+    payload = {
+        "api_key": SMTP2GO_API_KEY,
+        "sender": sender,
+        "to": [receiver],
+        "bcc": [sender],
+        "subject": subject,
+        "text_body": text_body,
+    }
+    if html_body:
+        payload["html_body"] = html_body
+    if attachments:
+        payload["attachments"] = attachments
+
+    try:
+        logger.info("SMTP2GO API sending receiver=%s subject=%s", receiver, subject)
+        response = requests.post(SMTP2GO_API_URL, json=payload, timeout=SMTP_TIMEOUT_SECONDS)
+    except requests.Timeout as e:
+        logger.warning("SMTP2GO API timed out receiver=%s", receiver)
+        raise EmailRetryNeeded("Email provider API timed out. Retrying later.") from e
+    except requests.RequestException as e:
+        logger.exception("SMTP2GO API request failed receiver=%s", receiver)
+        raise EmailRetryNeeded("Email provider API request failed. Retrying later.") from e
+
+    if response.status_code == 429:
+        logger.warning("SMTP2GO API rate limited receiver=%s response=%s", receiver, response.text[:500])
+        raise RateLimitExceeded("Email provider stopped sending. Please retry later.")
+    if response.status_code >= 500:
+        logger.warning("SMTP2GO API server error status=%s receiver=%s response=%s", response.status_code, receiver, response.text[:500])
+        raise EmailRetryNeeded("Email provider API is temporarily unavailable. Retrying later.")
+    if not response.ok:
+        logger.error("SMTP2GO API rejected message status=%s receiver=%s response=%s", response.status_code, receiver, response.text[:500])
+        raise ValueError(f"Email provider rejected the message: HTTP {response.status_code}")
+
+    try:
+        result = response.json()
+    except ValueError:
+        result = {}
+    data = result.get("data", {}) if isinstance(result, dict) else {}
+    failures = data.get("failures") or []
+    if failures:
+        logger.error("SMTP2GO API message failures receiver=%s failures=%s", receiver, failures)
+        raise ValueError(f"Email provider rejected the message for {receiver}")
+
+    logger.info("SMTP2GO API sent receiver=%s", receiver)
+
+
+def deliver_email(sender, receiver, subject, text_body, html_body=None, attachments=None):
+    if SMTP2GO_API_KEY:
+        send_with_smtp2go_api(sender, receiver, subject, text_body, html_body=html_body, attachments=attachments)
+        return
+
+    auth_user, auth_password = resolve_smtp_credentials()
+    message = MIMEMultipart()
+    message["From"] = sender
+    message["To"] = receiver
+    message["Bcc"] = sender
+    message["Subject"] = subject
+    message.attach(MIMEText(text_body, "plain"))
+    if html_body:
+        message.attach(MIMEText(html_body, "html"))
+    for attachment in attachments or []:
+        payload = MIMEBase("application", "octate-stream", Name=attachment["filename"])
+        payload.set_payload(base64.b64decode(attachment["fileblob"]))
+        encoders.encode_base64(payload)
+        payload.add_header("Content-Disposition", "attachment", filename=attachment["filename"])
+        message.attach(payload)
+    emailDelivery(auth_user, auth_password, message, receiver)
 
 
 def sendEmailWithImage(
@@ -146,17 +228,8 @@ def sendEmailWithImage(
                 Wishing you joy, peace, and prosperity in the coming year
                 '''
 
-    # put your email here
-    sender, password = resolve_smtp_credentials(smtp_user, smtp_password)
-    # put the email of the receiver here
+    sender = resolve_sender_email(smtp_user)
     receiver = receiver_email
-
-    #Setup the MIME
-    message = MIMEMultipart()
-    message['From'] = sender
-    message['To'] = receiver
-    message["Bcc"] = sender
-    message['Subject'] = 'Happy holidays from Conacent!'
 
     #read text from file if shipped 
     email_signature = '''
@@ -223,10 +296,13 @@ def sendEmailWithImage(
             </html>
     '''
 
-
-    message.attach(MIMEText(body, 'plain'))
-    message.attach(MIMEText(email_signature, 'html'))
-    emailDelivery(sender, password, message, receiver)
+    deliver_email(
+        sender,
+        receiver,
+        "Happy holidays from Conacent!",
+        body,
+        html_body=email_signature,
+    )
 
     
 
@@ -252,29 +328,18 @@ def sendEmailWithPDF(
                 Please find attached the {email_file_body} {month}.
                 {is_pan}
                 HR'''
-    # put your email here
-    sender, password = resolve_smtp_credentials(smtp_user, smtp_password)
-    # put the email of the receiver here
+    sender = resolve_sender_email(smtp_user)
     receiver = email
-      
-    #Setup the MIME
-    message = MIMEMultipart()
-    message['From'] = sender
-    message['To'] = receiver
-    message["Bcc"] = sender
-    message['Subject'] = f' {month}'
-
-    message.attach(MIMEText(body, 'plain'))
-
-    pdfname = pdf_name
-
-    payload = MIMEBase('application', 'octate-stream', Name=pdfname)
-    payload.set_payload(pdf_bytes)
-
-    # enconding the binary into base64
-    encoders.encode_base64(payload)
-
-    # add header with pdf name
-    payload.add_header('Content-Disposition', 'attachment', filename=pdfname)
-    message.attach(payload)
-    emailDelivery(sender, password, message, receiver)
+    deliver_email(
+        sender,
+        receiver,
+        f" {month}",
+        body,
+        attachments=[
+            {
+                "filename": pdf_name,
+                "fileblob": base64.b64encode(pdf_bytes).decode("ascii"),
+                "mimetype": "application/pdf",
+            }
+        ],
+    )

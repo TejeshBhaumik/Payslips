@@ -8,21 +8,13 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: 3.13.5
+      - key: SMTP2GO_API_KEY
+        sync: false
+      - key: SMTP_FROM_EMAIL
+        sync: false
       - key: SMTP_HOST
-        value: mail.conacent.com
+        value: mail.smtp2go.com
       - key: SMTP_PORT
-        value: "587"
+        value: "2525"
       - key: SMTP_USER
-        sync: false
-      - key: SMTP_PASSWORD
-        sync: false
-      - key: SMTP_DEBUG
-        value: "0"
-      - key: SMTP_RETRY_DELAY_SECONDS
-        value: "600"
-      - key: SMTP_TIMEOUT_SECONDS
-        value: "60"
-      - key: JOB_STATE_DIR
-        value: /tmp/payslips_jobs
-      - key: JOB_WORKER_THREADS
-        value: "2"
+        sy

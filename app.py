@@ -669,7 +669,7 @@ def run_extract_sync(
                 update_job(
                     job_id,
                     current=name,
-                    message=f"Sending payslip {pdf_send_index} of {pdf_send_total}",
+                    message=f"Connecting to email server for payslip {pdf_send_index} of {pdf_send_total}",
                 )
                 app.logger.info(
                     "Job %s sending PDF row=%s send_index=%s/%s pdf=%s recipient=%s",
