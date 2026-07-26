@@ -627,4 +627,28 @@ def run_extract_sync(
                         month=str(vals[0]),
                         person_name=str(vals[1]),
                         email_file_body=email_file_body,
-                    
+                        is_pan=is_pan,
+                        smtp_user=smtp_email,
+                        smtp_password=smtp_password,
+                    )
+                    update_job(
+                        job_id,
+                        sent=pdf_send_index,
+                        current=name,
+                        message=f"Sent payslip {pdf_send_index} of {pdf_send_total}",
+                    )
+                except sendEmail.EmailRetryNeeded as e:
+                    pdf_send_index -= 1
+                    e.excel_row = row_number
+                    e.sent = pdf_send_index
+                    raise
+                except Exception as e:
+                    app.logger.exception("Failed sending PDF email for %s", name)
+                    return f"Email send failed for {name}: {e}", 400
+        i += 1
+
+          
+    return "all payslips generated and sent", 200
+        
+if __name__ == "__main__":
+    app.run(debug = True, threaded=True, port = int(os.environ.get('PORT', 5000)))
