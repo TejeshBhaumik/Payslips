@@ -2,8 +2,10 @@
 import logging
 import os
 import base64
+import imaplib
 import smtplib
 import ssl
+from email.utils import formatdate
 import requests
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -22,6 +24,9 @@ SMTP_DEBUG = os.environ.get("SMTP_DEBUG", "0").strip().lower() in {"1", "true", 
 SMTP_TIMEOUT_SECONDS = int(os.environ.get("SMTP_TIMEOUT_SECONDS", "20"))
 SMTP2GO_API_KEY = os.environ.get("SMTP2GO_API_KEY", "").strip()
 SMTP2GO_API_URL = os.environ.get("SMTP2GO_API_URL", "https://api.smtp2go.com/v3/email/send")
+IMAP_HOST = os.environ.get("IMAP_HOST", "mail.conacent.com")
+IMAP_PORT = int(os.environ.get("IMAP_PORT", "993"))
+IMAP_SENT_FOLDER = os.environ.get("IMAP_SENT_FOLDER", "Sent")
 
 
 class EmailRetryNeeded(Exception):
@@ -81,6 +86,43 @@ def resolve_sender_email(form_sender=None):
     if not sender:
         raise ValueError("Sender email is required. Set SMTP_FROM_EMAIL or enter a sender email in the form.")
     return sender
+
+
+def build_mime_message(sender, receiver, subject, text_body, html_body=None, attachments=None):
+    message = MIMEMultipart()
+    message["From"] = sender
+    message["To"] = receiver
+    message["Subject"] = subject
+    message["Date"] = formatdate(localtime=True)
+    message.attach(MIMEText(text_body, "plain"))
+    if html_body:
+        message.attach(MIMEText(html_body, "html"))
+    for attachment in attachments or []:
+        payload = MIMEBase("application", "octate-stream", Name=attachment["filename"])
+        payload.set_payload(base64.b64decode(attachment["fileblob"]))
+        encoders.encode_base64(payload)
+        payload.add_header("Content-Disposition", "attachment", filename=attachment["filename"])
+        message.attach(payload)
+    return message
+
+
+def append_to_sent_folder(sender, mailbox_password, message):
+    if not mailbox_password:
+        logger.info("Skipping IMAP sent-copy append for sender=%s; no mailbox password supplied", sender)
+        return
+
+    try:
+        logger.info("IMAP connecting host=%s port=%s sender=%s", IMAP_HOST, IMAP_PORT, sender)
+        with imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT, timeout=SMTP_TIMEOUT_SECONDS) as mailbox:
+            mailbox.login(sender, mailbox_password)
+            encoded_message = message.as_bytes()
+            status, data = mailbox.append(IMAP_SENT_FOLDER, "\\Seen", imaplib.Time2Internaldate(None), encoded_message)
+            if status != "OK":
+                logger.warning("IMAP append failed sender=%s folder=%s status=%s data=%s", sender, IMAP_SENT_FOLDER, status, data)
+                return
+            logger.info("IMAP appended sent copy sender=%s folder=%s", sender, IMAP_SENT_FOLDER)
+    except Exception:
+        logger.exception("IMAP sent-copy append failed sender=%s folder=%s", sender, IMAP_SENT_FOLDER)
 
 
 def emailDelivery(auth_user, auth_password, message, receiver):
@@ -144,7 +186,6 @@ def send_with_smtp2go_api(sender, receiver, subject, text_body, html_body=None, 
         "api_key": SMTP2GO_API_KEY,
         "sender": sender,
         "to": [receiver],
-        "bcc": [sender],
         "subject": subject,
         "text_body": text_body,
     }
@@ -165,181 +206,4 @@ def send_with_smtp2go_api(sender, receiver, subject, text_body, html_body=None, 
 
     if response.status_code == 429:
         logger.warning("SMTP2GO API rate limited receiver=%s response=%s", receiver, response.text[:500])
-        raise RateLimitExceeded("Email provider stopped sending. Please retry later.")
-    if response.status_code >= 500:
-        logger.warning("SMTP2GO API server error status=%s receiver=%s response=%s", response.status_code, receiver, response.text[:500])
-        raise EmailRetryNeeded("Email provider API is temporarily unavailable. Retrying later.")
-    if not response.ok:
-        logger.error("SMTP2GO API rejected message status=%s receiver=%s response=%s", response.status_code, receiver, response.text[:500])
-        raise ValueError(f"Email provider rejected the message: HTTP {response.status_code}")
-
-    try:
-        result = response.json()
-    except ValueError:
-        result = {}
-    data = result.get("data", {}) if isinstance(result, dict) else {}
-    failures = data.get("failures") or []
-    if failures:
-        logger.error("SMTP2GO API message failures receiver=%s failures=%s", receiver, failures)
-        raise ValueError(f"Email provider rejected the message for {receiver}")
-
-    logger.info("SMTP2GO API sent receiver=%s", receiver)
-
-
-def deliver_email(sender, receiver, subject, text_body, html_body=None, attachments=None):
-    if SMTP2GO_API_KEY:
-        send_with_smtp2go_api(sender, receiver, subject, text_body, html_body=html_body, attachments=attachments)
-        return
-
-    auth_user, auth_password = resolve_smtp_credentials()
-    message = MIMEMultipart()
-    message["From"] = sender
-    message["To"] = receiver
-    message["Bcc"] = sender
-    message["Subject"] = subject
-    message.attach(MIMEText(text_body, "plain"))
-    if html_body:
-        message.attach(MIMEText(html_body, "html"))
-    for attachment in attachments or []:
-        payload = MIMEBase("application", "octate-stream", Name=attachment["filename"])
-        payload.set_payload(base64.b64decode(attachment["fileblob"]))
-        encoders.encode_base64(payload)
-        payload.add_header("Content-Disposition", "attachment", filename=attachment["filename"])
-        message.attach(payload)
-    emailDelivery(auth_user, auth_password, message, receiver)
-
-
-def sendEmailWithImage(
-    person_name,
-    img,
-    sender,
-    sender_title,
-    company,
-    com_address,
-    ph_number,
-    com_email,
-    receiver_email,
-    smtp_user=None,
-    smtp_password=None,
-):
-    
-    body = f''' Dear {person_name},
-                Happy holidays and a fantastic New Year to you!
-                Wishing you joy, peace, and prosperity in the coming year
-                '''
-
-    sender = resolve_sender_email(smtp_user)
-    receiver = receiver_email
-
-    #read text from file if shipped 
-    email_signature = '''
-            <!DOCTYPE html>
-            <html>
-            <head>
-            <title>Email Signature</title>
-            <style>
-                body {
-                font-family: Arial, sans-serif;
-                line-height: 1.6;
-                margin: 0;
-                padding: 0;
-                }
-                .email-signature {
-                max-width: 500px;
-                margin: 0 auto;
-                font-size: 16px;
-                color: #333;
-                border-bottom: 2px solid #ccc;
-                padding: 20px;
-                }
-                .name {
-                font-size: 18px;
-                font-weight: bold;
-                margin-bottom: 5px;
-                }
-                .title {
-                font-size: 16px;
-                margin-bottom: 5px;
-                }
-                .company {
-                font-size: 16px;
-                margin-bottom: 5px;
-                }
-                .address {
-                font-size: 16px;
-                margin-bottom: 5px;
-                }
-                .phone {
-                font-size: 16px;
-                margin-bottom: 5px;
-                }
-                .website {
-                font-size: 16px;
-                margin-bottom: 5px;
-                text-decoration: none;
-                color: #007bff;
-                }
-            </style>
-            </head>
-            <body>
-
-            <div class="email-signature">
-            <p class="name">Pranabesh Bhaumik</p>
-            <p class="title">Director</p>
-            <p class="company">Conacent Consulting Pvt Ltd</p>
-            <p class="address">CF-90 Salt Lake, Sector 1<br>Kolkata - 700064, INDIA</p>
-            <p class="phone">Ph: +91 98300 79710</p>
-            <p class="website"><a href="http://www.conacent.com" target="_blank">www.conacent.com</a></p>
-            </div>
-
-            </body>
-            </html>
-    '''
-
-    deliver_email(
-        sender,
-        receiver,
-        "Happy holidays from Conacent!",
-        body,
-        html_body=email_signature,
-    )
-
-    
-
-
-
-
-
-
-
-def sendEmailWithPDF(
-    pdf_bytes,
-    pdf_name,
-    email,
-    month,
-    person_name,
-    email_file_body,
-    is_pan,
-    smtp_user=None,
-    smtp_password=None,
-):
-
-    body = f''' Dear {person_name}, 
-                Please find attached the {email_file_body} {month}.
-                {is_pan}
-                HR'''
-    sender = resolve_sender_email(smtp_user)
-    receiver = email
-    deliver_email(
-        sender,
-        receiver,
-        f" {month}",
-        body,
-        attachments=[
-            {
-                "filename": pdf_name,
-                "fileblob": base64.b64encode(pdf_bytes).decode("ascii"),
-                "mimetype": "application/pdf",
-            }
-        ],
-    )
+ 
