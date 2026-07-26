@@ -298,4 +298,9 @@ function initPayslipUi() {
     limitModalClose.addEventListener("click", hideLimitModal);
     successModalClose.addEventListener("click", hideSuccessModal);
 
-    
+    form.querySelectorAll("input[type='file']").forEach((input) => {
+        input.addEventListener("change", () => updateFileLabel(input));
+    });
+}
+
+initPayslipUi();
