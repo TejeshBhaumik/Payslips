@@ -5,12 +5,9 @@ import base64
 import imaplib
 import smtplib
 import ssl
+from email.message import EmailMessage
 from email.utils import formatdate
 import requests
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
-from email.mime.base import MIMEBase
-from email import encoders
 
 
 logger = logging.getLogger(__name__)
@@ -99,21 +96,27 @@ def resolve_sender_email(form_sender=None):
     return sender
 
 
-def build_mime_message(sender, receiver, subject, text_body, html_body=None, attachments=None):
-    message = MIMEMultipart()
+def build_email_message(sender, receiver, subject, text_body, html_body=None, attachments=None):
+    message = EmailMessage()
     message["From"] = sender
     message["To"] = receiver
     message["Subject"] = subject
     message["Date"] = formatdate(localtime=True)
-    message.attach(MIMEText(text_body, "plain"))
+    message.set_content(text_body)
     if html_body:
-        message.attach(MIMEText(html_body, "html"))
+        message.add_alternative(html_body, subtype="html")
     for attachment in attachments or []:
-        payload = MIMEBase("application", "octate-stream", Name=attachment["filename"])
-        payload.set_payload(base64.b64decode(attachment["fileblob"]))
-        encoders.encode_base64(payload)
-        payload.add_header("Content-Disposition", "attachment", filename=attachment["filename"])
-        message.attach(payload)
+        content_type = attachment.get("content_type", "application/octet-stream")
+        maintype, _, subtype = content_type.partition("/")
+        if not subtype:
+            maintype = "application"
+            subtype = "octet-stream"
+        message.add_attachment(
+            base64.b64decode(attachment["fileblob"]),
+            maintype=maintype,
+            subtype=subtype,
+            filename=attachment["filename"],
+        )
     return message
 
 
@@ -198,7 +201,7 @@ def append_to_sent_folder(sender, mailbox_password, message):
     return False
 
 
-def emailDelivery(auth_user, auth_password, message, receiver):
+def emailDelivery(auth_user, auth_password, message, receiver, bcc=None):
     context = ssl.create_default_context()
     try:
         logger.info("SMTP connecting host=%s port=%s receiver=%s", SMTP_HOST, SMTP_PORT, receiver)
@@ -214,7 +217,10 @@ def emailDelivery(auth_user, auth_password, message, receiver):
 
             text = message.as_string()
             logger.info("SMTP sending message receiver=%s subject=%s", receiver, message.get("Subject", ""))
-            session.sendmail(message["From"], receiver, text)
+            recipients = [receiver]
+            if bcc and bcc != receiver:
+                recipients.append(bcc)
+            session.sendmail(message["From"], recipients, text)
             logger.info("SMTP sent message receiver=%s", receiver)
     except smtplib.SMTPRecipientsRefused as e:
         if _is_recipient_rate_limit(e):
@@ -254,7 +260,7 @@ def emailDelivery(auth_user, auth_password, message, receiver):
         raise
 
 
-def send_with_smtp2go_api(sender, receiver, subject, text_body, html_body=None, attachments=None):
+def send_with_smtp2go_api(sender, receiver, subject, text_body, html_body=None, attachments=None, bcc=None):
     payload = {
         "api_key": SMTP2GO_API_KEY,
         "sender": sender,
@@ -266,6 +272,8 @@ def send_with_smtp2go_api(sender, receiver, subject, text_body, html_body=None, 
         payload["html_body"] = html_body
     if attachments:
         payload["attachments"] = attachments
+    if bcc and bcc != receiver:
+        payload["bcc"] = [bcc]
 
     try:
         logger.info("SMTP2GO API sending receiver=%s subject=%s", receiver, subject)
@@ -301,14 +309,30 @@ def send_with_smtp2go_api(sender, receiver, subject, text_body, html_body=None, 
 
 
 def deliver_email(sender, receiver, subject, text_body, html_body=None, attachments=None, mailbox_password=None):
-    message = build_mime_message(sender, receiver, subject, text_body, html_body=html_body, attachments=attachments)
+    bcc = sender
+    message = build_email_message(
+        sender,
+        receiver,
+        subject,
+        text_body,
+        html_body=html_body,
+        attachments=attachments,
+    )
     if SMTP2GO_API_KEY:
-        send_with_smtp2go_api(sender, receiver, subject, text_body, html_body=html_body, attachments=attachments)
+        send_with_smtp2go_api(
+            sender,
+            receiver,
+            subject,
+            text_body,
+            html_body=html_body,
+            attachments=attachments,
+            bcc=bcc,
+        )
         append_to_sent_folder(sender, mailbox_password, message)
         return
 
     auth_user, auth_password = resolve_smtp_credentials()
-    emailDelivery(auth_user, auth_password, message, receiver)
+    emailDelivery(auth_user, auth_password, message, receiver, bcc=bcc)
     append_to_sent_folder(sender, mailbox_password, message)
 
 
@@ -443,7 +467,7 @@ def sendEmailWithPDF(
             {
                 "filename": pdf_name,
                 "fileblob": base64.b64encode(pdf_bytes).decode("ascii"),
-                "mimetype": "application/pdf",
+                "content_type": "application/pdf",
             }
         ],
         mailbox_password=smtp_password,

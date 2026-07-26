@@ -1,5 +1,6 @@
 const form = document.querySelector("#payslipForm");
 const excelFile = document.querySelector("#excelFile");
+const smtpPassword = document.querySelector("#smtpPassword");
 const options = document.querySelector("#options");
 const customFields = document.querySelector("#customFields");
 const emailOnlyFields = document.querySelector("#emailOnly");
@@ -39,6 +40,10 @@ function setFieldsDisabled(container, disabled) {
 
 function setFormDisabled(disabled) {
     form.querySelectorAll("input, select, textarea").forEach((input) => {
+        if (input === smtpPassword) {
+            input.disabled = true;
+            return;
+        }
         input.disabled = disabled;
     });
 }
@@ -293,9 +298,4 @@ function initPayslipUi() {
     limitModalClose.addEventListener("click", hideLimitModal);
     successModalClose.addEventListener("click", hideSuccessModal);
 
-    form.querySelectorAll("input[type='file']").forEach((input) => {
-        input.addEventListener("change", () => updateFileLabel(input));
-    });
-}
-
-initPayslipUi();
+    
